@@ -4,9 +4,13 @@ cc-sessions — Claude Code session manager.
 Interactive curses picker to browse, search, and resume sessions.
 
 Usage:
-    cc-sessions              Interactive picker → resume selected session
-    cc-sessions note [TASK] [TXT]  View/edit task scratchpad
-    cc-sessions hook         Hook entry point (reads JSON from stdin)
+    cc-sessions                              Interactive picker
+    cc-sessions new TICKET [/PHASE] Title    Start new session (normalized)
+    cc-sessions hop [TITLE|ID] [--dry-run]   Hop to next session version
+    cc-sessions del TITLE|ID                 Delete a session transcript
+    cc-sessions status TASK [STATUS]          Get/set task status
+    cc-sessions note [TASK] [TXT]            View/edit task scratchpad
+    cc-sessions hook                         Hook entry point (stdin JSON)
 """
 
 import json, sys, os, re, time, subprocess, pathlib, shlex, curses
@@ -18,6 +22,7 @@ CLAUDE_DIR = pathlib.Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 INDEX_FILE = CLAUDE_DIR / "task-index.jsonl"
 NOTES_DIR = CLAUDE_DIR / "task-notes"
+TRASH_DIR = CLAUDE_DIR / "trash"
 
 # ── Colors (ANSI for hooks/notes, curses pairs for picker) ──────────
 
@@ -66,10 +71,30 @@ def _ansi_truncate(s, max_visible):
 
 # ── Task key extraction ──────────────────────────────────────────────
 
+TICKET_RE = re.compile(r'^([A-Za-z]+-\d+)/(\d+)\.(\d{3}):\s*(.+)$')
+
+
+def _parse_ticket_title(title):
+    if not title:
+        return None
+    m = TICKET_RE.match(title.strip())
+    if m:
+        return {
+            'ticket': m.group(1),
+            'phase': int(m.group(2)),
+            'session': int(m.group(3)),
+            'title': m.group(4),
+        }
+    return None
+
+
 def extract_task_key(title):
     if not title:
         return None
     s = title.strip()
+    t = _parse_ticket_title(s)
+    if t:
+        return f"{t['ticket']}/{t['phase']}: {t['title']}"
     s = re.sub(r'^\[[\w\s/]+\]\s*[-–—]?\s*', '', s)
     s = re.sub(r'^(DONE|WIP|TODO|INIT)\s*[-–—]\s*', '', s, flags=re.IGNORECASE)
     s = re.sub(r'\s*[-–—]\s*[vV]?\d+\s*$', '', s)
@@ -324,6 +349,7 @@ def _build_rows(sessions, scope, view_idx):
             'sid': '__header__', 'is_header': True,
             'name_str': f"  {C_DIM}No sessions in this scope{C_RESET}",
             'ts': '', 'bar': '', 'bar_tokens': 0, 'sid8': '',
+            'task_key': None,
         })
         return rows
 
@@ -355,6 +381,7 @@ def _build_rows(sessions, scope, view_idx):
                 'bar': ctx_bar(ctx) if ctx else '',
                 'bar_tokens': ctx,
                 'sid8': s['session_id'][:8],
+                'task_key': s.get('task_key'),
             })
     else:
         groups = group_sessions(filtered)
@@ -375,6 +402,7 @@ def _build_rows(sessions, scope, view_idx):
                 'sid': '__header__', 'is_header': True,
                 'name_str': f"  {C_BYELLOW}━━ {proj} ━━{C_RESET}",
                 'ts': '', 'bar': '', 'bar_tokens': 0, 'sid8': '',
+                'task_key': None,
             })
 
             for task_key, slist in proj_groups:
@@ -383,24 +411,34 @@ def _build_rows(sessions, scope, view_idx):
                 has_renamed = any(s.get('renamed') for s in slist)
                 icon = '★' if has_renamed else '○'
 
+                status = _get_task_status(task_key)
+                si_icon = STATUS_ICONS.get(status, '○')
+                si_color = STATUS_COLORS.get(status)
+                if si_color:
+                    status_str = f"\033[{32 if si_color == _CP_GREEN else 33 if si_color == _CP_YELLOW else 31}m{si_icon}\033[0m"
+                else:
+                    status_str = f"{C_DIM}{si_icon}{C_RESET}"
+
                 if n == 1:
                     s = slist[0]
                     rows.append({
                         'sid': s['session_id'], 'is_header': False,
-                        'name_str': f"  {C_BCYAN}{icon}{C_RESET} {C_BCYAN}{task_key}{C_RESET}",
+                        'name_str': f"  {status_str} {C_BCYAN}{task_key}{C_RESET}",
                         'ts': fmt_ts(s.get('last_ts')),
                         'bar': ctx_bar(max_ctx) if max_ctx else '',
                         'bar_tokens': max_ctx,
                         'sid8': s['session_id'][:8],
+                        'task_key': task_key,
                     })
                 else:
                     rows.append({
                         'sid': '__header__', 'is_header': True,
-                        'name_str': f"  {C_BCYAN}{icon}{C_RESET} {C_BCYAN}{task_key}{C_RESET}",
+                        'name_str': f"  {status_str} {C_BCYAN}{task_key}{C_RESET}",
                         'ts': fmt_ts(slist[0].get('last_ts')),
                         'bar': ctx_bar(max_ctx) if max_ctx else '',
                         'bar_tokens': max_ctx,
                         'sid8': '',
+                        'task_key': task_key,
                     })
 
                     for si, s in enumerate(slist):
@@ -426,6 +464,7 @@ def _build_rows(sessions, scope, view_idx):
                             'bar': ctx_bar(ctx) if ctx else '',
                             'bar_tokens': ctx,
                             'sid8': s['session_id'][:8],
+                            'task_key': task_key,
                         })
 
     return rows
@@ -646,6 +685,48 @@ def _get_task_note(task_key):
     return None
 
 
+STATUSES = ['open', 'wip', 'done', 'blocked']
+STATUS_ICONS = {'open': '○', 'wip': '◐', 'done': '●', 'blocked': '◌'}
+STATUS_COLORS = {'open': None, 'wip': _CP_YELLOW, 'done': _CP_GREEN, 'blocked': _CP_RED}
+
+
+def _get_task_status(task_key):
+    note = _get_task_note(task_key)
+    if not note:
+        return 'open'
+    if note.startswith('---'):
+        end = note.find('---', 3)
+        if end > 0:
+            front = note[3:end]
+            m = re.search(r'^status:\s*(\w+)', front, re.MULTILINE)
+            if m and m.group(1) in STATUSES:
+                return m.group(1)
+    return 'open'
+
+
+def _set_task_status(task_key, status):
+    if not task_key or status not in STATUSES:
+        return
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    note_file = NOTES_DIR / f"{sanitize(task_key)}.md"
+    if note_file.exists():
+        content = note_file.read_text()
+        if content.strip().startswith('---'):
+            end = content.find('---', 3)
+            if end > 0:
+                front = content[3:end]
+                body = content[end + 3:]
+                if re.search(r'^status:', front, re.MULTILINE):
+                    front = re.sub(r'^status:\s*\w+', f'status: {status}', front, flags=re.MULTILINE)
+                else:
+                    front = f'status: {status}\n' + front
+                note_file.write_text(f'---{front}---{body}')
+                return
+        note_file.write_text(f'---\nstatus: {status}\n---\n{content}')
+    else:
+        note_file.write_text(f'---\nstatus: {status}\n---\n')
+
+
 _CP_PANEL = 7
 _CP_PBORDER = 8
 
@@ -675,15 +756,23 @@ def _draw_detail_panel(win, top_y, max_x, panel_h, session, sessions):
     pad = 2
 
     title = session.get('title') or '???'
+    task_key = session.get('task_key')
+    status = _get_task_status(task_key) if task_key else 'open'
+    si = STATUS_ICONS.get(status, '○')
     if session.get('renamed'):
         icon = '★ '
     elif session.get('title'):
         icon = '○ '
     else:
         icon = '· '
+    status_label = f' [{status}]' if status != 'open' else ''
     try:
-        win.addstr(y, pad, icon + title[:inner_w - len(icon)],
+        win.addstr(y, pad, icon + title[:inner_w - len(icon) - len(status_label)],
                    curses.color_pair(_CP_PANEL_CYAN) | curses.A_BOLD)
+        if status_label:
+            sc = STATUS_COLORS.get(status)
+            sattr = curses.color_pair(sc) if sc else curses.A_DIM
+            win.addstr(status_label, sattr | curses.A_BOLD)
     except curses.error:
         pass
     y += 1
@@ -934,7 +1023,7 @@ def _pick_loop(stdscr, sessions):
             panel_top = list_start + list_h
             _draw_detail_panel(stdscr, panel_top, max_x, panel_h, cur_session, sessions)
 
-        hints = '  Tab: scope  ⇧Tab: view  ^O: note  ^D: panel' if not query else ''
+        hints = '  Tab: scope  ⇧Tab: view  ^O: note  ^S: status  ^X: del  ^D: panel' if not query else ''
         right_info = f' {n_sel}/{total}{hints} '
         rule_attr = curses.color_pair(_CP_CYAN)
         label_attr = curses.color_pair(_CP_BAR_ACC) | curses.A_REVERSE
@@ -992,6 +1081,22 @@ def _pick_loop(stdscr, sessions):
             task_key = cur_session.get('task_key')
             if task_key:
                 _note_input(stdscr, max_y, max_x, task_key)
+                stdscr.clear()
+        elif ch == 19 and cur_session:  # Ctrl+S = cycle status
+            task_key = cur_session.get('task_key')
+            if task_key:
+                cur_status = _get_task_status(task_key)
+                idx = STATUSES.index(cur_status) if cur_status in STATUSES else 0
+                new_status = STATUSES[(idx + 1) % len(STATUSES)]
+                _set_task_status(task_key, new_status)
+                stdscr.clear()
+        elif ch == 24 and cur_session:  # Ctrl+X = trash session
+            tp = cur_session.get('transcript', '')
+            if tp and os.path.exists(tp):
+                _trash_session(tp)
+                sessions[:] = [s for s in sessions if s.get('transcript') != tp]
+                cursor = 0
+                scroll = 0
                 stdscr.clear()
         elif ch == 4:  # Ctrl+D = toggle detail panel
             show_panel = not show_panel
@@ -1089,14 +1194,28 @@ def cmd_hook():
             'source': payload.get('source'),
         }) + '\n')
 
-    if event == 'SessionStart' and task:
-        NOTES_DIR.mkdir(parents=True, exist_ok=True)
-        note = NOTES_DIR / f"{sanitize(task)}.md"
-        if note.exists():
-            content = note.read_text().strip()
-            if content:
-                print(f"## Resuming task: {task}")
-                print(f"Prior session notes:\n\n{content[:4000]}")
+    if event == 'SessionStart':
+        result = {}
+        if branch:
+            bm = re.match(r'^([A-Za-z]+-\d+)/(\d+)$', branch)
+            if bm:
+                result['ticket'] = bm.group(1)
+                result['phase'] = int(bm.group(2))
+
+        if task:
+            NOTES_DIR.mkdir(parents=True, exist_ok=True)
+            note = NOTES_DIR / f"{sanitize(task)}.md"
+            if note.exists():
+                content = note.read_text().strip()
+                if content:
+                    body = content
+                    if body.startswith('---'):
+                        end = body.find('---', 3)
+                        if end > 0:
+                            body = body[end + 3:].strip()
+                    if body:
+                        print(f"## Resuming task: {task}")
+                        print(f"Prior session notes:\n\n{body[:4000]}")
 
 
 def _resolve_task(cwd, tp):
@@ -1120,6 +1239,170 @@ def _resolve_task(cwd, tp):
     return 'untagged'
 
 
+# ── Status ──────────────────────────────────────────────────────────
+
+def cmd_status(task_query, new_status=None):
+    sessions = scan_transcripts()
+    q = task_query.lower()
+    match_key = None
+    for s in sessions:
+        tk = s.get('task_key') or ''
+        if q in tk.lower():
+            match_key = tk
+            break
+    if not match_key:
+        for s in sessions:
+            t = (s.get('title') or '').lower()
+            if q in t:
+                match_key = s.get('task_key')
+                break
+    if not match_key:
+        print(f"No task matching '{task_query}'", file=sys.stderr)
+        sys.exit(1)
+    if new_status:
+        if new_status not in STATUSES:
+            print(f"Invalid status '{new_status}'. Use: {', '.join(STATUSES)}", file=sys.stderr)
+            sys.exit(1)
+        _set_task_status(match_key, new_status)
+        icon = STATUS_ICONS.get(new_status, '?')
+        print(f"{icon} {match_key} → {new_status}")
+    else:
+        cur = _get_task_status(match_key)
+        icon = STATUS_ICONS.get(cur, '?')
+        print(f"{icon} {match_key}: {cur}")
+
+
+# ── New session ─────────────────────────────────────────────────────
+
+def _parse_new_input(text):
+    text = text.strip()
+    m = re.match(r'^([A-Za-z]+-\d+)/(\d+)\.(\d+):?\s+(.+)$', text)
+    if m:
+        return m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+    m = re.match(r'^([A-Za-z]+-\d+)/(\d+):?\s+(.+)$', text)
+    if m:
+        return m.group(1), int(m.group(2)), 1, m.group(3)
+    m = re.match(r'^([A-Za-z]+-\d+):?\s+(.+)$', text)
+    if m:
+        return m.group(1), 1, 1, m.group(2)
+    return None
+
+
+def cmd_new(text):
+    parsed = _parse_new_input(text)
+    if not parsed:
+        print("Usage: csm new 'TICKET Title' or 'TICKET/PHASE Title'", file=sys.stderr)
+        print("  e.g. csm new 'SET-123 Implement settlements'", file=sys.stderr)
+        print("       csm new 'SET-123/2 Implement settlements'", file=sys.stderr)
+        print("       csm new 'SET-123/2.005: Implement settlements'", file=sys.stderr)
+        sys.exit(1)
+    ticket, phase, session, title = parsed
+    full_title = f"{ticket}/{phase}.{session:03d}: {title}"
+    os.execvp('claude', ['claude', '-n', full_title])
+
+
+# ── Delete ──────────────────────────────────────────────────────────
+
+def cmd_del(query):
+    sessions = scan_transcripts()
+    q = query.lower()
+    matches = []
+    for s in sessions:
+        if s['session_id'].startswith(q):
+            matches.append(s)
+        elif q in (s.get('title') or '').lower():
+            matches.append(s)
+    if not matches:
+        print(f"No session matching '{query}'", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1:
+        print(f"Multiple matches ({len(matches)}):", file=sys.stderr)
+        for s in matches[:10]:
+            print(f"  {s['session_id'][:8]}  {s.get('title', '???')}", file=sys.stderr)
+        print("Use a more specific query or session ID.", file=sys.stderr)
+        sys.exit(1)
+    s = matches[0]
+    tp = s.get('transcript', '')
+    sid = s['session_id'][:8]
+    title = s.get('title') or '???'
+    if tp and os.path.exists(tp):
+        _trash_session(tp)
+        print(f"Trashed: {sid}  {title}")
+    else:
+        print(f"Transcript not found: {tp}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _trash_session(transcript_path):
+    TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    src = pathlib.Path(transcript_path)
+    dst = TRASH_DIR / src.name
+    src.rename(dst)
+
+
+# ── Hop ─────────────────────────────────────────────────────────────
+
+def _bump_version(title):
+    t = _parse_ticket_title(title)
+    if t:
+        ns = t['session'] + 1
+        return f"{t['ticket']}/{t['phase']}.{ns:03d}: {t['title']}"
+    m = re.search(r'([-–—]\s*[vV])(\d+)\s*$', title)
+    if m:
+        num = int(m.group(2)) + 1
+        width = len(m.group(2))
+        return title[:m.start()] + m.group(1) + str(num).zfill(width)
+    m = re.search(r'([-–—]\s*#)(\d+)\s*$', title)
+    if m:
+        return title[:m.start()] + m.group(1) + str(int(m.group(2)) + 1)
+    m = re.search(r'\(([vV])(\d+)\)\s*$', title)
+    if m:
+        return title[:m.start()] + f'({m.group(1)}{int(m.group(2)) + 1})'
+    key = extract_task_key(title)
+    return f"{key} - v002"
+
+
+def cmd_hop(query=None, dry_run=False):
+    sessions = scan_transcripts()
+    match = None
+    if query:
+        q = query.lower()
+        for s in sessions:
+            if s['session_id'].startswith(q):
+                match = s
+                break
+        if not match:
+            for s in sessions:
+                t = (s.get('title') or '').lower()
+                if q in t:
+                    match = s
+                    break
+    else:
+        cwd = os.getcwd()
+        cwd_sessions = [s for s in sessions if s.get('cwd', '').startswith(cwd)]
+        if cwd_sessions:
+            cwd_sessions.sort(key=lambda s: s.get('last_ts') or '', reverse=True)
+            match = cwd_sessions[0]
+    if not match:
+        print(f"No session found{' matching ' + repr(query) if query else ' for ' + os.getcwd()}", file=sys.stderr)
+        sys.exit(1)
+
+    title = match.get('title') or 'Untitled'
+    new_title = _bump_version(title)
+    transcript = match.get('transcript', '')
+
+    prompt = (
+        f'Read the previous session transcript at {transcript} '
+        f'(JSONL format: user messages in type=user message.content, '
+        f'assistant messages in type=assistant message.content[].text). '
+        f'Continue where we left off.'
+    )
+    if dry_run:
+        print(f'python3 /media/nvme4tb/DEV/claude-session-manager/cc-sessions hop "{title}"')
+    else:
+        os.execvp('claude', ['claude', '-n', new_title, prompt])
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
@@ -1137,6 +1420,27 @@ def main():
         cmd_note(task, text)
     elif cmd == 'hook':
         cmd_hook()
+    elif cmd == 'new':
+        if len(args) < 2:
+            print("Usage: csm new 'TICKET Title'", file=sys.stderr)
+            sys.exit(1)
+        cmd_new(' '.join(args[1:]))
+    elif cmd in ('del', 'delete', 'rm'):
+        if len(args) < 2:
+            print("Usage: csm del <title-or-session-id>", file=sys.stderr)
+            sys.exit(1)
+        cmd_del(' '.join(args[1:]))
+    elif cmd == 'hop':
+        dry = '--dry-run' in args
+        rest = [a for a in args[1:] if a != '--dry-run']
+        cmd_hop(' '.join(rest) if rest else None, dry_run=dry)
+    elif cmd == 'status':
+        if len(args) < 2:
+            print("Usage: cc-sessions status <task> [open|wip|done|blocked]", file=sys.stderr)
+            sys.exit(1)
+        new_st = args[-1] if len(args) > 2 and args[-1] in STATUSES else None
+        task_q = ' '.join(args[1:] if not new_st else args[1:-1])
+        cmd_status(task_q, new_st)
     elif cmd == 'index':
         if INDEX_FILE.exists():
             print(INDEX_FILE.read_text())

@@ -15,15 +15,21 @@ Claude Code has no session grouping. When you run 10+ sessions at 1M tokens each
 ```bash
 git clone https://github.com/Bitmads/claude-session-manager.git
 cd claude-session-manager
-chmod +x cc-sessions
-
-# Add alias to your shell
-echo 'alias csm="python3 '$(pwd)'/cc-sessions"' >> ~/.zshrc
-source ~/.zshrc
+./install.sh
 ```
 
-That's enough to run `csm`. For hooks, the `/hop` skill, clipboard copy, and
-customizing the naming convention, see **[INSTALLATION.md](INSTALLATION.md)**.
+`install.sh` is idempotent and touches nothing system-wide: it adds the `csm`
+alias to your shell rc and installs the `/hop` skill. Then open a new terminal
+and run `csm`.
+
+Prefer to do it by hand? Just alias the script — `python3` is the only requirement:
+
+```bash
+echo 'alias csm="python3 '$(pwd)'/cc-sessions"' >> ~/.zshrc && source ~/.zshrc
+```
+
+For hooks, clipboard copy, and customizing the naming convention, see
+**[INSTALLATION.md](INSTALLATION.md)**.
 
 ## Usage
 

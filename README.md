@@ -2,6 +2,10 @@
 
 A terminal UI for managing Claude Code sessions. Browse, search, resume, and organize sessions with an interactive curses picker — no external dependencies beyond Python 3 stdlib.
 
+<p align="center">
+  <img src="demo/picker.gif" alt="csm — browse, search, and organize Claude Code sessions" width="850">
+</p>
+
 ## Why
 
 Claude Code has no session grouping. When you run 10+ sessions at 1M tokens each, finding and resuming the right one becomes painful. `csm` fixes that with a full-screen interactive picker, task-based grouping, context usage indicators, and session lifecycle tools.

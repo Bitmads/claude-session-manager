@@ -1,0 +1,6 @@
+# generated demo dataset (rebuilt by make_demo_data.py)
+home/
+# VHS frame scratch
+frames/
+frames_*.png
+*.ascii

@@ -780,11 +780,16 @@ def _get_last_user_msg(transcript_path, max_chars=200):
 
 
 def _get_task_note(task_key):
+    """Note body with any YAML frontmatter (status, etc.) stripped."""
     if not task_key:
         return None
     note_file = NOTES_DIR / f"{sanitize(task_key)}.md"
     if note_file.exists():
         content = note_file.read_text().strip()
+        if content.startswith('---'):
+            end = content.find('---', 3)
+            if end >= 0:
+                content = content[end + 3:].strip()
         if content:
             return content
     return None

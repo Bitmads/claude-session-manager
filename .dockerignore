@@ -1,0 +1,6 @@
+.git
+demo/home
+demo/frames
+demo/*.gif
+demo/*.mp4
+__pycache__

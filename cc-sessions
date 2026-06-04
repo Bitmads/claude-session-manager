@@ -74,10 +74,17 @@ def _ansi_truncate(s, max_visible):
 TICKET_RE = re.compile(r'^([A-Za-z]+-\d+)/(\d+)\.(\d{3}):\s*(.+)$')
 
 
+def _strip_wrapping_quotes(s):
+    s = s.strip()
+    while len(s) >= 2 and s[0] == s[-1] and s[0] in '"\'':
+        s = s[1:-1].strip()
+    return s
+
+
 def _parse_ticket_title(title):
     if not title:
         return None
-    m = TICKET_RE.match(title.strip())
+    m = TICKET_RE.match(_strip_wrapping_quotes(title))
     if m:
         return {
             'ticket': m.group(1),

@@ -3,4 +3,6 @@ home/
 # VHS frame scratch
 frames/
 frames_*.png
+vchk_*.png
+_*.mp4
 *.ascii

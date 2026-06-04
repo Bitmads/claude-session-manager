@@ -17,7 +17,7 @@ Config: ~/.claude/csm.json (or $CSM_CONFIG). See `cc-sessions config`.
 """
 
 import json, sys, os, re, time, subprocess, pathlib, shlex, shutil, curses
-import fcntl, struct, termios
+import fcntl, struct, termios, threading
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -202,6 +202,26 @@ def scan_transcripts():
             if s:
                 sessions.append(s)
     return sessions
+
+
+def _transcript_signature():
+    """Cheap stat-only fingerprint of all transcripts. Changes on any
+    create/delete (count) or append/rename (mtime). No file parsing."""
+    count = 0
+    newest = 0
+    if PROJECTS_DIR.exists():
+        for proj_dir in PROJECTS_DIR.iterdir():
+            if not proj_dir.is_dir():
+                continue
+            for f in proj_dir.glob("*.jsonl"):
+                try:
+                    count += 1
+                    m = f.stat().st_mtime_ns
+                    if m > newest:
+                        newest = m
+                except OSError:
+                    pass
+    return (count, newest)
 
 
 def _parse_transcript(path, proj_name):
@@ -1002,7 +1022,7 @@ def _tty_size():
         return 24, 80
 
 
-def _pick_loop(stdscr, sessions):
+def _pick_loop(stdscr, state):
     curses.start_color()
     curses.use_default_colors()
     curses.curs_set(0)
@@ -1030,6 +1050,8 @@ def _pick_loop(stdscr, sessions):
     PANEL_H = 10
 
     while True:
+        sessions = state['sessions']
+
         real_h, real_w = _tty_size()
         cur_h, cur_w = stdscr.getmaxyx()
         if real_w != cur_w or real_h != cur_h:
@@ -1108,7 +1130,7 @@ def _pick_loop(stdscr, sessions):
             panel_top = list_start + list_h
             _draw_detail_panel(stdscr, panel_top, max_x, panel_h, cur_session, sessions)
 
-        hints = '  Tab: scope  ⇧Tab: view  ^O: note  ^S: status  ^X: del  ^D: panel' if not query else ''
+        hints = '  Tab: scope  ⇧Tab: view  ^O: note  ^S: status  ^X: del  ^R: refresh  ^D: panel' if not query else ''
         right_info = f' {n_sel}/{total}{hints} '
         rule_attr = curses.color_pair(_CP_CYAN)
         label_attr = curses.color_pair(_CP_BAR_ACC) | curses.A_REVERSE
@@ -1179,10 +1201,15 @@ def _pick_loop(stdscr, sessions):
             tp = cur_session.get('transcript', '')
             if tp and os.path.exists(tp):
                 _trash_session(tp)
-                sessions[:] = [s for s in sessions if s.get('transcript') != tp]
+                state['sessions'] = [s for s in sessions if s.get('transcript') != tp]
+                state['sig'] = _transcript_signature()
                 cursor = 0
                 scroll = 0
                 stdscr.clear()
+        elif ch == 18:  # Ctrl+R = force refresh
+            state['sessions'] = scan_transcripts()
+            state['sig'] = _transcript_signature()
+            stdscr.clear()
         elif ch == 4:  # Ctrl+D = toggle detail panel
             show_panel = not show_panel
             stdscr.clear()
@@ -1194,16 +1221,36 @@ def _pick_loop(stdscr, sessions):
 
 # ── Picker command ───────────────────────────────────────────────────
 
+def _bg_refresh(state, stop_evt):
+    """Watch transcripts; re-scan only when the cheap signature changes."""
+    while not stop_evt.wait(1.0):
+        try:
+            sig = _transcript_signature()
+            if sig != state['sig']:
+                fresh = scan_transcripts()
+                state['sessions'] = fresh
+                state['sig'] = sig
+        except Exception:
+            pass
+
+
 def cmd_pick():
     sessions = scan_transcripts()
     if not sessions:
         print("No sessions found.")
         return
 
+    state = {'sessions': sessions, 'sig': _transcript_signature()}
+    stop_evt = threading.Event()
+    worker = threading.Thread(target=_bg_refresh, args=(state, stop_evt), daemon=True)
+    worker.start()
+
     try:
-        selected = curses.wrapper(lambda stdscr: _pick_loop(stdscr, sessions))
+        selected = curses.wrapper(lambda stdscr: _pick_loop(stdscr, state))
     except curses.error:
         selected = None
+    finally:
+        stop_evt.set()
 
     if not selected:
         return

@@ -801,16 +801,18 @@ STATUS_COLORS = {'open': None, 'wip': _CP_YELLOW, 'done': _CP_GREEN, 'blocked': 
 
 
 def _get_task_status(task_key):
-    note = _get_task_note(task_key)
-    if not note:
+    if not task_key:
         return 'open'
-    if note.startswith('---'):
-        end = note.find('---', 3)
-        if end > 0:
-            front = note[3:end]
-            m = re.search(r'^status:\s*(\w+)', front, re.MULTILINE)
-            if m and m.group(1) in STATUSES:
-                return m.group(1)
+    note_file = NOTES_DIR / f"{sanitize(task_key)}.md"
+    if note_file.exists():
+        content = note_file.read_text()
+        if content.startswith('---'):
+            end = content.find('---', 3)
+            if end > 0:
+                front = content[3:end]
+                m = re.search(r'^status:\s*(\w+)', front, re.MULTILINE)
+                if m and m.group(1) in STATUSES:
+                    return m.group(1)
     return 'open'
 
 

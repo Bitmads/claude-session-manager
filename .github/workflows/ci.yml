@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Compile
+        run: python3 -m py_compile cc-sessions
+
+      - name: Generate demo dataset
+        run: python3 demo/make_demo_data.py
+
+      - name: Non-interactive commands work
+        run: |
+          export HOME="$PWD/demo/home"
+          python3 cc-sessions config
+          python3 cc-sessions status "PAY-204/1"
+          python3 cc-sessions hop "PAY-204/1.002: Refactor checkout flow" --dry-run
+
+      - name: Naming logic (parse / bump / group)
+        run: |
+          python3 - <<'PY'
+          import importlib.machinery, importlib.util
+          loader = importlib.machinery.SourceFileLoader("ccs", "cc-sessions")
+          spec = importlib.util.spec_from_loader("ccs", loader)
+          ccs = importlib.util.module_from_spec(spec); loader.exec_module(ccs)
+
+          assert ccs._bump_version("SET-123/1.001: Title") == "SET-123/1.002: Title"
+          assert ccs._bump_version('"SET-9/1.001: Quoted"') == "SET-9/1.002: Quoted"
+          assert ccs.extract_task_key("SET-123/1.003: Title") == "SET-123/1: Title"
+          assert ccs._bump_version("Legacy - v003") == "Legacy - v004"
+          print("naming ok")
+          PY
+
+      - name: Status + note frontmatter handling
+        run: |
+          export HOME="$PWD/demo/home"
+          python3 - <<'PY'
+          import importlib.machinery, importlib.util
+          loader = importlib.machinery.SourceFileLoader("ccs", "cc-sessions")
+          spec = importlib.util.spec_from_loader("ccs", loader)
+          ccs = importlib.util.module_from_spec(spec); loader.exec_module(ccs)
+
+          key = "PAY-204/1: Refactor checkout flow"
+          # status reads frontmatter; note body has the frontmatter stripped
+          assert ccs._get_task_status(key) == "wip", ccs._get_task_status(key)
+          body = ccs._get_task_note(key) or ""
+          assert "status:" not in body and "---" not in body, repr(body)
+          assert "idempotency" in body
+          print("status+note ok")
+          PY

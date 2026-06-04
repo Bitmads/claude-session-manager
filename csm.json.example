@@ -1,0 +1,11 @@
+{
+  "copy": {
+    "command": ""
+  },
+  "naming": {
+    "pattern": "^(?P<ticket>[A-Za-z]+-\\d+)/(?P<phase>\\d+)\\.(?P<session>\\d{3}):\\s*(?P<title>.+)$",
+    "full_template": "{ticket}/{phase}.{session:03d}: {title}",
+    "group_template": "{ticket}/{phase}: {title}",
+    "bump_field": "session"
+  }
+}

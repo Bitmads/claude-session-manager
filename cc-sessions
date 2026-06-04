@@ -10,10 +10,13 @@ Usage:
     cc-sessions del TITLE|ID                 Delete a session transcript
     cc-sessions status TASK [STATUS]          Get/set task status
     cc-sessions note [TASK] [TXT]            View/edit task scratchpad
+    cc-sessions config [--init]              Show/create config file
     cc-sessions hook                         Hook entry point (stdin JSON)
+
+Config: ~/.claude/csm.json (or $CSM_CONFIG). See `cc-sessions config`.
 """
 
-import json, sys, os, re, time, subprocess, pathlib, shlex, curses
+import json, sys, os, re, time, subprocess, pathlib, shlex, shutil, curses
 import fcntl, struct, termios
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -23,6 +26,62 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 INDEX_FILE = CLAUDE_DIR / "task-index.jsonl"
 NOTES_DIR = CLAUDE_DIR / "task-notes"
 TRASH_DIR = CLAUDE_DIR / "trash"
+
+
+# ── Configuration ────────────────────────────────────────────────────
+#
+# Overridable via a JSON config file at ~/.claude/csm.json (or $CSM_CONFIG).
+# Zero config = these defaults, which match the SET-123/1.001: Title scheme.
+
+DEFAULT_CONFIG = {
+    "copy": {
+        # Shell command the hop line is piped into. Empty = disabled.
+        # "auto" = detect pbcopy / wl-copy / xclip / xsel / clip.exe.
+        # Overridable per-invocation with the $CSM_COPY_CMD env var.
+        "command": "",
+    },
+    "naming": {
+        # Named-group regex that parses a session title.
+        "pattern": r"^(?P<ticket>[A-Za-z]+-\d+)/(?P<phase>\d+)\.(?P<session>\d{3}):\s*(?P<title>.+)$",
+        # Template to rebuild the full title (str.format with the groups).
+        "full_template": "{ticket}/{phase}.{session:03d}: {title}",
+        # Template to rebuild the grouping key (usually omits bump_field).
+        "group_template": "{ticket}/{phase}: {title}",
+        # Which named group `hop` increments (must be numeric).
+        "bump_field": "session",
+    },
+}
+
+_CONFIG = None
+
+
+def _config_path():
+    p = os.environ.get("CSM_CONFIG")
+    return pathlib.Path(p) if p else CLAUDE_DIR / "csm.json"
+
+
+def _load_config():
+    global _CONFIG
+    if _CONFIG is not None:
+        return _CONFIG
+    cfg = {k: dict(v) for k, v in DEFAULT_CONFIG.items()}
+    path = _config_path()
+    try:
+        if path.exists():
+            user = json.loads(path.read_text())
+            for section, vals in user.items():
+                if isinstance(vals, dict) and isinstance(cfg.get(section), dict):
+                    cfg[section].update(vals)
+                else:
+                    cfg[section] = vals
+    except Exception as e:
+        print(f"csm: ignoring bad config at {path}: {e}", file=sys.stderr)
+    _CONFIG = cfg
+    return cfg
+
+
+def _naming():
+    return _load_config().get("naming", DEFAULT_CONFIG["naming"])
 
 # ── Colors (ANSI for hooks/notes, curses pairs for picker) ──────────
 
@@ -69,10 +128,7 @@ def _ansi_truncate(s, max_visible):
     return ''.join(result)
 
 
-# ── Task key extraction ──────────────────────────────────────────────
-
-TICKET_RE = re.compile(r'^([A-Za-z]+-\d+)/(\d+)\.(\d{3}):\s*(.+)$')
-
+# ── Task key extraction (config-driven) ──────────────────────────────
 
 def _strip_wrapping_quotes(s):
     s = s.strip()
@@ -81,27 +137,49 @@ def _strip_wrapping_quotes(s):
     return s
 
 
-def _parse_ticket_title(title):
+def _parse_title(title):
+    """Parse a title with the configured pattern → dict of named groups (strings), or None."""
     if not title:
         return None
-    m = TICKET_RE.match(_strip_wrapping_quotes(title))
-    if m:
-        return {
-            'ticket': m.group(1),
-            'phase': int(m.group(2)),
-            'session': int(m.group(3)),
-            'title': m.group(4),
-        }
-    return None
+    pattern = _naming().get("pattern")
+    if not pattern:
+        return None
+    try:
+        m = re.match(pattern, _strip_wrapping_quotes(title))
+    except re.error:
+        return None
+    return m.groupdict() if m else None
+
+
+def _render_title(template, groups, bump_field=None):
+    """Rebuild a title from a template + groups. bump_field is coerced to int so {x:03d} works."""
+    fmt = dict(groups)
+    if bump_field and fmt.get(bump_field) is not None:
+        try:
+            fmt[bump_field] = int(fmt[bump_field])
+        except (TypeError, ValueError):
+            pass
+    try:
+        return template.format(**fmt)
+    except Exception:
+        return None
+
+
+# Back-compat alias used elsewhere; returns parsed groups or None.
+def _parse_ticket_title(title):
+    return _parse_title(title)
 
 
 def extract_task_key(title):
     if not title:
         return None
-    s = title.strip()
-    t = _parse_ticket_title(s)
-    if t:
-        return f"{t['ticket']}/{t['phase']}: {t['title']}"
+    nm = _naming()
+    groups = _parse_title(title)
+    if groups:
+        key = _render_title(nm.get("group_template", ""), groups, nm.get("bump_field"))
+        if key:
+            return key
+    s = _strip_wrapping_quotes(title)
     s = re.sub(r'^\[[\w\s/]+\]\s*[-–—]?\s*', '', s)
     s = re.sub(r'^(DONE|WIP|TODO|INIT)\s*[-–—]\s*', '', s, flags=re.IGNORECASE)
     s = re.sub(r'\s*[-–—]\s*[vV]?\d+\s*$', '', s)
@@ -1347,13 +1425,61 @@ def _trash_session(transcript_path):
     src.rename(dst)
 
 
+# ── Clipboard ───────────────────────────────────────────────────────
+
+def _autodetect_copy():
+    if sys.platform == 'darwin' and shutil.which('pbcopy'):
+        return 'pbcopy'
+    if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wl-copy'):
+        return 'wl-copy'
+    if shutil.which('xclip'):
+        return 'xclip -selection clipboard'
+    if shutil.which('xsel'):
+        return 'xsel --clipboard --input'
+    if shutil.which('clip.exe'):
+        return 'clip.exe'
+    if sys.platform.startswith('win') and shutil.which('clip'):
+        return 'clip'
+    return ''
+
+
+def _copy_command():
+    cmd = os.environ.get('CSM_COPY_CMD')
+    if cmd is None:
+        cmd = _load_config().get('copy', {}).get('command', '')
+    cmd = (cmd or '').strip()
+    if cmd == 'auto':
+        return _autodetect_copy()
+    return cmd
+
+
+def _copy_to_clipboard(text):
+    cmd = _copy_command()
+    if not cmd:
+        return False
+    try:
+        subprocess.run(cmd, shell=True, input=text.encode(),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
 # ── Hop ─────────────────────────────────────────────────────────────
 
 def _bump_version(title):
-    t = _parse_ticket_title(title)
-    if t:
-        ns = t['session'] + 1
-        return f"{t['ticket']}/{t['phase']}.{ns:03d}: {t['title']}"
+    nm = _naming()
+    groups = _parse_title(title)
+    bf = nm.get("bump_field")
+    if groups and bf and bf in groups and groups[bf] is not None:
+        try:
+            groups = dict(groups)
+            groups[bf] = str(int(groups[bf]) + 1)
+            out = _render_title(nm.get("full_template", ""), groups, bf)
+            if out:
+                return out
+        except (TypeError, ValueError):
+            pass
     m = re.search(r'([-–—]\s*[vV])(\d+)\s*$', title)
     if m:
         num = int(m.group(2)) + 1
@@ -1405,9 +1531,36 @@ def cmd_hop(query=None, dry_run=False):
         f'Continue where we left off.'
     )
     if dry_run:
-        print(f'python3 /media/nvme4tb/DEV/claude-session-manager/cc-sessions hop "{title}"')
+        clean = _strip_wrapping_quotes(title)
+        self_path = os.path.abspath(__file__)
+        line = f'{sys.executable} {shlex.quote(self_path)} hop "{clean}"'
+        copied = _copy_to_clipboard(line)
+        print(line)
+        if copied:
+            print('# copied to clipboard', file=sys.stderr)
     else:
         os.execvp('claude', ['claude', '-n', new_title, prompt])
+
+
+# ── Config command ──────────────────────────────────────────────────
+
+def cmd_config(init=False):
+    path = _config_path()
+    if init:
+        if path.exists():
+            print(f"Config already exists at {path}", file=sys.stderr)
+            sys.exit(1)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
+        print(f"Wrote default config to {path}")
+        print("Edit it to customize naming convention and clipboard copy.")
+        return
+    cfg = _load_config()
+    copy_cmd = _copy_command()
+    print(f"Config file: {path}{'' if path.exists() else '  (not present — using defaults)'}")
+    print(f"Copy command: {copy_cmd or '(disabled)'}")
+    print()
+    print(json.dumps(cfg, indent=2))
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -1448,6 +1601,8 @@ def main():
         new_st = args[-1] if len(args) > 2 and args[-1] in STATUSES else None
         task_q = ' '.join(args[1:] if not new_st else args[1:-1])
         cmd_status(task_q, new_st)
+    elif cmd == 'config':
+        cmd_config('--init' in args)
     elif cmd == 'index':
         if INDEX_FILE.exists():
             print(INDEX_FILE.read_text())

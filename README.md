@@ -18,30 +18,8 @@ echo 'alias csm="python3 '$(pwd)'/cc-sessions"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-### Hook setup
-
-Add to `~/.claude/settings.json` to enable session tracking and task notes injection:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [{
-      "matcher": "startup|resume|clear|compact",
-      "hooks": [{ "type": "command", "command": "python3 /path/to/cc-sessions hook" }]
-    }],
-    "SessionEnd": [{
-      "hooks": [{ "type": "command", "command": "python3 /path/to/cc-sessions hook" }]
-    }],
-    "PreCompact": [{
-      "hooks": [{ "type": "command", "command": "python3 /path/to/cc-sessions hook" }]
-    }]
-  }
-}
-```
-
-### /hop skill
-
-Copy `skills/hop/` to `~/.claude/skills/hop/` to enable the `/hop` slash command inside Claude Code for session continuation.
+That's enough to run `csm`. For hooks, the `/hop` skill, clipboard copy, and
+customizing the naming convention, see **[INSTALLATION.md](INSTALLATION.md)**.
 
 ## Usage
 
@@ -126,6 +104,8 @@ Moves transcript to `~/.claude/trash/` (recoverable).
 
 ## Naming convention
 
+The **default** session-title scheme:
+
 ```
 TICKET/PHASE.SESSION: Title
 ```
@@ -139,7 +119,49 @@ TICKET/PHASE.SESSION: Title
 
 Full example: `SET-123/1.003: Implement multi-country settlements`
 
-Legacy titles (e.g. `Session Manager - v003`) are still supported.
+**This is fully configurable** — you are not locked into it. The parse / bump /
+group logic is driven by a named-group regex and templates in
+`~/.claude/csm.json`. Bring your own scheme (`JIRA-123 v5`, `name-NNN`, anything).
+Legacy titles (e.g. `Session Manager - v003`) work without any config.
+
+See [Configuration](#configuration) below.
+
+## Configuration
+
+Optional JSON config at `~/.claude/csm.json` (or `$CSM_CONFIG`). Zero config =
+sensible defaults. Inspect or create it:
+
+```bash
+csm config           # show effective config + where it loads from
+csm config --init    # write a starter ~/.claude/csm.json
+```
+
+### Clipboard copy (off by default)
+
+Have `/hop` copy its command to your clipboard. Set `copy.command` to `"auto"`
+(detects pbcopy / wl-copy / xclip / xsel / clip.exe) or an explicit command:
+
+```json
+{ "copy": { "command": "auto" } }
+```
+
+Or override per-invocation with `$CSM_COPY_CMD`. Empty = disabled.
+
+### Custom naming scheme
+
+```json
+{
+  "naming": {
+    "pattern": "^(?P<key>[A-Z]+-\\d+) v(?P<v>\\d+)$",
+    "full_template": "{key} v{v}",
+    "group_template": "{key}",
+    "bump_field": "v"
+  }
+}
+```
+
+`ABC-42 v5` → hop → `ABC-42 v6`, grouped as `ABC-42`. Full reference and more
+examples in **[INSTALLATION.md](INSTALLATION.md#6-customize-the-naming-convention-optional)**.
 
 ## Detail panel
 

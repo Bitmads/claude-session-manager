@@ -199,6 +199,11 @@ The bottom panel (toggle with Ctrl+D) shows for the selected session:
 ~/.claude/skills/hop/SKILL.md    → /hop skill for Claude Code
 ```
 
+## Contributing
+
+Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The golden rule:
+keep it a single, stdlib-only Python file.
+
 ## License
 
 MIT

@@ -41,9 +41,11 @@ Full-screen curses UI. Sessions grouped by task, sorted by recency. Right-side c
 | Tab | Toggle scope: Current directory / All |
 | Shift+Tab | Cycle view: Grouped-Date, Grouped-A-Z, Flat-Date, Flat-A-Z |
 | Type | Fuzzy search filter |
+| Ctrl+E | Rename selected session |
 | Ctrl+O | Add note to selected task |
 | Ctrl+S | Cycle task status (open/wip/done/blocked) |
-| Ctrl+X | Trash selected session |
+| Ctrl+X | Trash selected session (asks to confirm) |
+| Ctrl+R | Refresh now (the picker also auto-refreshes) |
 | Ctrl+D | Toggle detail panel |
 
 ### Start a new session

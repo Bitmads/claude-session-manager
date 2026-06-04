@@ -993,6 +993,65 @@ def _note_input(stdscr, max_y, max_x, task_key):
                 pass
 
 
+def _text_input(stdscr, max_y, max_x, prompt, initial=''):
+    """Inline editable text field on the bottom row. Returns text, or None on Esc."""
+    text = initial
+    label = curses.color_pair(_CP_YELLOW) | curses.A_BOLD
+    input_start = len(prompt)
+    curses.curs_set(1)
+    while True:
+        try:
+            stdscr.addstr(max_y - 1, 0, ' ' * (max_x - 1), label)
+            stdscr.addstr(max_y - 1, 0, prompt[:max_x - 1], label)
+            stdscr.addstr(max_y - 1, input_start, text[:max_x - input_start - 1],
+                          curses.color_pair(_CP_YELLOW))
+            stdscr.move(max_y - 1, min(input_start + len(text), max_x - 1))
+        except curses.error:
+            pass
+        stdscr.refresh()
+        ch = stdscr.getch()
+        if ch in (curses.KEY_ENTER, 10, 13):
+            curses.curs_set(0)
+            return text.strip()
+        elif ch == 27 or ch == 3:
+            curses.curs_set(0)
+            return None
+        elif ch in (curses.KEY_BACKSPACE, 127, 8):
+            text = text[:-1]
+        elif 32 <= ch <= 126:
+            text += chr(ch)
+
+
+def _confirm(stdscr, max_y, max_x, message):
+    """Bottom-row y/N prompt. Returns True only on 'y'/'Y'."""
+    attr = curses.color_pair(_CP_RED) | curses.A_BOLD
+    try:
+        stdscr.addstr(max_y - 1, 0, ' ' * (max_x - 1), attr)
+        stdscr.addstr(max_y - 1, 0, message[:max_x - 1], attr)
+    except curses.error:
+        pass
+    stdscr.refresh()
+    while True:
+        ch = stdscr.getch()
+        if ch in (ord('y'), ord('Y')):
+            return True
+        if ch in (ord('n'), ord('N'), 27, 3, 10, 13):
+            return False
+
+
+def _rename_session(transcript_path, session_id, new_title):
+    """Append a custom-title record — the same shape Claude Code's /rename writes."""
+    if not transcript_path or not os.path.exists(transcript_path) or not new_title:
+        return False
+    rec = {"type": "custom-title", "customTitle": new_title, "sessionId": session_id}
+    try:
+        with open(transcript_path, 'a') as f:
+            f.write(json.dumps(rec) + "\n")
+        return True
+    except OSError:
+        return False
+
+
 def _fuzzy_match(query, text):
     q = query.lower()
     t = text.lower()
@@ -1130,7 +1189,7 @@ def _pick_loop(stdscr, state):
             panel_top = list_start + list_h
             _draw_detail_panel(stdscr, panel_top, max_x, panel_h, cur_session, sessions)
 
-        hints = '  Tab: scope  ⇧Tab: view  ^O: note  ^S: status  ^X: del  ^R: refresh  ^D: panel' if not query else ''
+        hints = '  Tab: scope  ⇧Tab: view  ^E: rename  ^O: note  ^S: status  ^X: del  ^R: refresh  ^D: panel' if not query else ''
         right_info = f' {n_sel}/{total}{hints} '
         rule_attr = curses.color_pair(_CP_CYAN)
         label_attr = curses.color_pair(_CP_BAR_ACC) | curses.A_REVERSE
@@ -1197,14 +1256,27 @@ def _pick_loop(stdscr, state):
                 new_status = STATUSES[(idx + 1) % len(STATUSES)]
                 _set_task_status(task_key, new_status)
                 stdscr.clear()
-        elif ch == 24 and cur_session:  # Ctrl+X = trash session
+        elif ch == 5 and cur_session:  # Ctrl+E = rename session
             tp = cur_session.get('transcript', '')
-            if tp and os.path.exists(tp):
-                _trash_session(tp)
-                state['sessions'] = [s for s in sessions if s.get('transcript') != tp]
+            sid = cur_session.get('session_id', '')
+            cur_title = cur_session.get('title') or ''
+            new = _text_input(stdscr, max_y, max_x, ' Rename: ', cur_title)
+            if new and new != cur_title and _rename_session(tp, sid, new):
+                cur_session['title'] = new
+                cur_session['renamed'] = True
+                cur_session['task_key'] = extract_task_key(new)
                 state['sig'] = _transcript_signature()
-                cursor = 0
-                scroll = 0
+            stdscr.clear()
+        elif ch == 24 and cur_session:  # Ctrl+X = trash session (with confirm)
+            tp = cur_session.get('transcript', '')
+            title = cur_session.get('title') or cur_session.get('session_id', '')[:8]
+            if tp and os.path.exists(tp):
+                if _confirm(stdscr, max_y, max_x, f' Delete "{title[:max_x - 24]}"?  (y/N) '):
+                    _trash_session(tp)
+                    state['sessions'] = [s for s in sessions if s.get('transcript') != tp]
+                    state['sig'] = _transcript_signature()
+                    cursor = 0
+                    scroll = 0
                 stdscr.clear()
         elif ch == 18:  # Ctrl+R = force refresh
             state['sessions'] = scan_transcripts()

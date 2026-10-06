@@ -81,10 +81,23 @@ When context runs out, use `/hop` inside Claude Code or run from CLI:
 csm hop                                    # latest session for cwd
 csm hop "SET-123/1.003: Implement..."      # specific session by title
 csm hop 5897ff98                           # by session ID prefix
+csm hop --handoff docs/HANDOFF.md          # new session reads this doc first
 csm hop --dry-run                          # print command without executing
 ```
 
-Bumps the session number: `SET-123/1.003` → `SET-123/1.004`. Starts a new Claude session pointing at the previous transcript so Claude can read the full conversation and continue.
+Bumps the session number: `SET-123/1.003` → `SET-123/1.004` and starts a new
+Claude session. Its opening prompt tells Claude to read the handoff doc first
+(if given), use the previous transcript only for details the handoff lacks,
+and verify live state before acting. Without `--handoff` it points Claude at
+the previous transcript.
+
+The `/hop` skill does three things in the current session before hopping:
+
+1. Updates READMEs, plan files, docs, and comments to reflect the whole session.
+2. Writes a detailed handoff doc (goal, state, next steps, required reading,
+   files, commands, decisions, user feedback, gotchas, live state).
+3. Runs `csm hop --dry-run --handoff <doc>` and replies with only the command
+   line to paste (also copied to the clipboard if configured).
 
 ### Task status
 

@@ -214,5 +214,19 @@ class TestProjLabel(unittest.TestCase):
         self.assertEqual(ccs.proj_label("-srv-app-web"), "app/web")
 
 
+
+class TestHopPrompt(unittest.TestCase):
+    def test_with_handoff_reads_handoff_first(self):
+        out = ccs._hop_prompt("SET-1/1.001: X", "abc123", "/t/x.jsonl", "/h/HANDOFF.md")
+        self.assertIn('continues "SET-1/1.001: X"', out)
+        self.assertIn("abc123", out)
+        self.assertLess(out.index("/h/HANDOFF.md"), out.index("/t/x.jsonl"))
+        self.assertIn("Do not read it wholesale", out)
+
+    def test_without_handoff_uses_transcript(self):
+        out = ccs._hop_prompt("SET-1/1.001: X", "abc123", "/t/x.jsonl")
+        self.assertIn("/t/x.jsonl", out)
+        self.assertNotIn("handoff", out.lower())
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

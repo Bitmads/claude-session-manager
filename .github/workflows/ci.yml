@@ -28,3 +28,5 @@ jobs:
           python3 cc-sessions config
           python3 cc-sessions status "PAY-204/1"
           python3 cc-sessions hop "PAY-204/1.002: Refactor checkout flow" --dry-run
+          echo "# handoff" > /tmp/HANDOFF.md
+          python3 cc-sessions hop "PAY-204/1.002: Refactor checkout flow" --handoff /tmp/HANDOFF.md --dry-run

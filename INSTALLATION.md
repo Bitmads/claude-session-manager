@@ -50,12 +50,23 @@ Hooks track sessions and auto-inject task notes when you resume. Add to `~/.clau
 ## 4. /hop skill (optional)
 
 The `/hop` slash command continues a session in a fresh one when context fills up.
+Before hopping it updates the project docs and writes a handoff doc, then prints
+the `csm hop ... --handoff <doc>` command to paste in a new terminal.
 
 ```bash
 cp -r skills/hop ~/.claude/skills/hop
 ```
 
 Edit the path inside `~/.claude/skills/hop/SKILL.md` to point at your `cc-sessions`.
+`install.sh` does both for you, but skips the copy if the skill already exists;
+after updating the repo, re-copy it by hand to pick up the new skill text.
+
+To let `/hop` run without a permission prompt, allow it in `~/.claude/settings.json`
+(the `--handoff` path changes every time, so use a wildcard):
+
+```json
+{ "permissions": { "allow": ["Bash(python3 /full/path/to/cc-sessions hop *)"] } }
+```
 
 ## 5. Clipboard copy (optional)
 

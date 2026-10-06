@@ -6,7 +6,8 @@ Interactive curses picker to browse, search, and resume sessions.
 Usage:
     cc-sessions                              Interactive picker
     cc-sessions new TICKET [/PHASE] Title    Start new session (normalized)
-    cc-sessions hop [TITLE|ID] [--dry-run]   Hop to next session version
+    cc-sessions hop [TITLE|ID] [--handoff FILE] [--dry-run]
+                                             Hop to next session version
     cc-sessions del TITLE|ID                 Delete a session transcript
     cc-sessions status TASK [STATUS]          Get/set task status
     cc-sessions note [TASK] [TXT]            View/edit task scratchpad
@@ -1621,7 +1622,39 @@ def _bump_version(title):
     return f"{key} - v002"
 
 
-def cmd_hop(query=None, dry_run=False):
+def _hop_prompt(title, session_id, transcript, handoff=None):
+    """Opening prompt for the continuation session.
+
+    With a handoff doc (written by the /hop skill before hopping), that doc is
+    the primary source of truth and the transcript is only a fallback. Without
+    one, the transcript is all the new session has.
+    """
+    jsonl = ('JSONL: user turns are type=user message.content, assistant text is '
+             'type=assistant message.content[].text')
+    head = f'This session continues "{title}" (previous session {session_id}).'
+    if handoff:
+        return (
+            f'{head}\n\n'
+            f'1. Read the handoff document first, in full: {handoff}\n'
+            f'   It is the authoritative record of the goal, current state, decisions and next steps.\n'
+            f'2. Read every file the handoff marks as required reading before touching code.\n'
+            f'3. The previous transcript is at {transcript} ({jsonl}). '
+            f'Do not read it wholesale; grep it only for details the handoff lacks.\n'
+            f'4. Verify the handoff\'s claims about live state (git status, running processes, '
+            f'deployed versions, file contents) before acting on them. If anything disagrees, '
+            f'stop and report the discrepancy with evidence.\n'
+            f'5. Then reply with a short status (where things stand, the immediate next step) and '
+            f'continue with that step, unless it is destructive or the handoff says to wait for the user.'
+        )
+    return (
+        f'{head}\n\n'
+        f'Read the previous session transcript at {transcript} ({jsonl}). '
+        f'Focus on the most recent part: the last goal, what was done, and what was pending. '
+        f'Reply with a short status and the immediate next step, then continue where we left off.'
+    )
+
+
+def cmd_hop(query=None, dry_run=False, handoff=None):
     sessions = scan_transcripts()
     match = None
     if query:
@@ -1650,16 +1683,19 @@ def cmd_hop(query=None, dry_run=False):
     new_title = _bump_version(title)
     transcript = match.get('transcript', '')
 
-    prompt = (
-        f'Read the previous session transcript at {transcript} '
-        f'(JSONL format: user messages in type=user message.content, '
-        f'assistant messages in type=assistant message.content[].text). '
-        f'Continue where we left off.'
-    )
+    if handoff:
+        handoff = os.path.abspath(os.path.expanduser(handoff))
+        if not os.path.isfile(handoff):
+            print(f"Handoff file not found: {handoff}", file=sys.stderr)
+            sys.exit(1)
+    prompt = _hop_prompt(_strip_wrapping_quotes(title), match.get('session_id', ''),
+                         transcript, handoff)
     if dry_run:
         clean = _strip_wrapping_quotes(title)
         self_path = os.path.abspath(__file__)
-        line = f'{sys.executable} {shlex.quote(self_path)} hop "{clean}"'
+        line = f'{sys.executable} {shlex.quote(self_path)} hop {shlex.quote(clean)}'
+        if handoff:
+            line += f' --handoff {shlex.quote(handoff)}'
         copied = _copy_to_clipboard(line)
         print(line)
         if copied:
@@ -1717,9 +1753,19 @@ def main():
             sys.exit(1)
         cmd_del(' '.join(args[1:]))
     elif cmd == 'hop':
-        dry = '--dry-run' in args
-        rest = [a for a in args[1:] if a != '--dry-run']
-        cmd_hop(' '.join(rest) if rest else None, dry_run=dry)
+        dry, handoff, rest = False, None, []
+        it = iter(args[1:])
+        for a in it:
+            if a == '--dry-run':
+                dry = True
+            elif a == '--handoff':
+                handoff = next(it, None)
+                if not handoff:
+                    print("Usage: csm hop [TITLE|ID] --handoff FILE", file=sys.stderr)
+                    sys.exit(1)
+            else:
+                rest.append(a)
+        cmd_hop(' '.join(rest) if rest else None, dry_run=dry, handoff=handoff)
     elif cmd == 'status':
         if len(args) < 2:
             print("Usage: cc-sessions status <task> [open|wip|done|blocked]", file=sys.stderr)

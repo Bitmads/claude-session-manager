@@ -90,10 +90,8 @@ Inside Claude Code, `csm hop` targets the session that ran it (via
 don't get mixed up. A title query prefers an exact title match over a partial one.
 
 Bumps the session number: `SET-123/1.003` → `SET-123/1.004` and starts a new
-Claude session. Its opening prompt tells Claude to read the handoff doc first
-(if given), use the previous transcript only for details the handoff lacks,
-and verify live state before acting. Without `--handoff` it points Claude at
-the previous transcript.
+Claude session. Its opening prompt tells Claude to read the previous
+transcript and, if `--handoff` is given, also the handoff doc, then continue.
 
 The `/hop` skill does three things in the current session before hopping:
 

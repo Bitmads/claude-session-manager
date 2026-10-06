@@ -216,17 +216,18 @@ class TestProjLabel(unittest.TestCase):
 
 
 class TestHopPrompt(unittest.TestCase):
-    def test_with_handoff_reads_handoff_first(self):
-        out = ccs._hop_prompt("SET-1/1.001: X", "abc123", "/t/x.jsonl", "/h/HANDOFF.md")
-        self.assertIn('continues "SET-1/1.001: X"', out)
-        self.assertIn("abc123", out)
-        self.assertLess(out.index("/h/HANDOFF.md"), out.index("/t/x.jsonl"))
-        self.assertIn("Do not read it wholesale", out)
+    OLD = ("Read the previous session transcript at /t/x.jsonl (JSONL format: user messages in "
+           "type=user message.content, assistant messages in type=assistant message.content[].text). ")
 
-    def test_without_handoff_uses_transcript(self):
-        out = ccs._hop_prompt("SET-1/1.001: X", "abc123", "/t/x.jsonl")
-        self.assertIn("/t/x.jsonl", out)
-        self.assertNotIn("handoff", out.lower())
+    def test_without_handoff_is_the_original_prompt(self):
+        self.assertEqual(ccs._hop_prompt("T", "id", "/t/x.jsonl"),
+                         self.OLD + "Continue where we left off.")
+
+    def test_handoff_is_added_not_a_replacement(self):
+        out = ccs._hop_prompt("T", "id", "/t/x.jsonl", "/h/HANDOFF.md")
+        self.assertTrue(out.startswith(self.OLD))
+        self.assertIn("/h/HANDOFF.md", out)
+        self.assertNotIn("grep", out)
 
 
 class TestFindHopSession(unittest.TestCase):

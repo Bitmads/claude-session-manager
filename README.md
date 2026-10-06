@@ -87,7 +87,7 @@ csm hop --dry-run                          # print command without executing
 
 Inside Claude Code, `csm hop` targets the session that ran it (via
 `$CLAUDE_CODE_SESSION_ID`), so parallel sessions in the same directory
-don't get mixed up. The printed command names the session by ID, not title.
+don't get mixed up. A title query prefers an exact title match over a partial one.
 
 Bumps the session number: `SET-123/1.003` → `SET-123/1.004` and starts a new
 Claude session. Its opening prompt tells Claude to read the handoff doc first

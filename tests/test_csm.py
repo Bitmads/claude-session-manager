@@ -250,5 +250,9 @@ class TestFindHopSession(unittest.TestCase):
         self.assertEqual(ccs._find_hop_session(self.S, "set-1/1")["session_id"], "aaa111")
         self.assertIsNone(ccs._find_hop_session(self.S, "nope"))
 
+    def test_exact_title_beats_substring(self):
+        s = [dict(self.S[0], session_id="ccc", title="SET-1/1.001: X v2"), self.S[0]]
+        self.assertEqual(ccs._find_hop_session(s, "SET-1/1.001: X")["session_id"], "aaa111")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

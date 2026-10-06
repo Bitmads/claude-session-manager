@@ -1657,7 +1657,8 @@ def _hop_prompt(title, session_id, transcript, handoff=None):
 def _find_hop_session(sessions, query=None, current_id=None, cwd=None):
     """Pick the session to hop from.
 
-    query: session-ID prefix, else title substring.
+    query: session-ID prefix, else exact title, else title substring (an exact
+    title must win: "SET-1/1.001: X" is also a substring of "SET-1/1.001: X v2").
     No query: the calling Claude session ($CLAUDE_CODE_SESSION_ID, matched on
     session_id or transcript filename). Only when that is unavailable (plain
     CLI use) fall back to the newest session in cwd, which is ambiguous when
@@ -1668,8 +1669,13 @@ def _find_hop_session(sessions, query=None, current_id=None, cwd=None):
         for s in sessions:
             if s['session_id'].startswith(q):
                 return s
-        for s in sessions:
-            if q in (s.get('title') or '').lower():
+        titled = [(s, _strip_wrapping_quotes(s.get('title') or '').lower()) for s in sessions]
+        q = _strip_wrapping_quotes(q)
+        for s, t in titled:
+            if t == q:
+                return s
+        for s, t in titled:
+            if q in t:
                 return s
         return None
     if current_id:
@@ -1705,9 +1711,7 @@ def cmd_hop(query=None, dry_run=False, handoff=None):
     if dry_run:
         clean = _strip_wrapping_quotes(title)
         self_path = os.path.abspath(__file__)
-        # Pass the session ID, not the title: titles can repeat or be substrings
-        # of each other, so a title query can resolve to a different session.
-        line = f'{sys.executable} {shlex.quote(self_path)} hop {shlex.quote(match["session_id"])}'
+        line = f'{sys.executable} {shlex.quote(self_path)} hop {shlex.quote(clean)}'
         if handoff:
             line += f' --handoff {shlex.quote(handoff)}'
         copied = _copy_to_clipboard(line)

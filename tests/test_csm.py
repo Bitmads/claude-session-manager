@@ -228,5 +228,27 @@ class TestHopPrompt(unittest.TestCase):
         self.assertIn("/t/x.jsonl", out)
         self.assertNotIn("handoff", out.lower())
 
+
+class TestFindHopSession(unittest.TestCase):
+    S = [
+        {"session_id": "aaa111", "title": "SET-1/1.001: X", "cwd": "/p", "last_ts": "2026-01-02", "transcript": "/t/aaa111.jsonl"},
+        {"session_id": "bbb222", "title": "SET-2/1.001: Y", "cwd": "/p", "last_ts": "2026-01-03", "transcript": "/t/bbb222.jsonl"},
+    ]
+
+    def test_current_session_beats_newer_session_in_same_cwd(self):
+        self.assertEqual(ccs._find_hop_session(self.S, None, "aaa111", "/p")["session_id"], "aaa111")
+
+    def test_current_id_matches_transcript_filename(self):
+        s = [dict(self.S[0], session_id="other")]
+        self.assertIs(ccs._find_hop_session(s, None, "aaa111", "/p"), s[0])
+
+    def test_falls_back_to_newest_in_cwd_without_current_id(self):
+        self.assertEqual(ccs._find_hop_session(self.S, None, None, "/p")["session_id"], "bbb222")
+
+    def test_query_by_id_prefix_then_title(self):
+        self.assertEqual(ccs._find_hop_session(self.S, "bbb")["session_id"], "bbb222")
+        self.assertEqual(ccs._find_hop_session(self.S, "set-1/1")["session_id"], "aaa111")
+        self.assertIsNone(ccs._find_hop_session(self.S, "nope"))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

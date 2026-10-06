@@ -1654,27 +1654,39 @@ def _hop_prompt(title, session_id, transcript, handoff=None):
     )
 
 
-def cmd_hop(query=None, dry_run=False, handoff=None):
-    sessions = scan_transcripts()
-    match = None
+def _find_hop_session(sessions, query=None, current_id=None, cwd=None):
+    """Pick the session to hop from.
+
+    query: session-ID prefix, else title substring.
+    No query: the calling Claude session ($CLAUDE_CODE_SESSION_ID, matched on
+    session_id or transcript filename). Only when that is unavailable (plain
+    CLI use) fall back to the newest session in cwd, which is ambiguous when
+    several sessions run in the same directory.
+    """
     if query:
         q = query.lower()
         for s in sessions:
             if s['session_id'].startswith(q):
-                match = s
-                break
-        if not match:
-            for s in sessions:
-                t = (s.get('title') or '').lower()
-                if q in t:
-                    match = s
-                    break
-    else:
-        cwd = os.getcwd()
+                return s
+        for s in sessions:
+            if q in (s.get('title') or '').lower():
+                return s
+        return None
+    if current_id:
+        for s in sessions:
+            if current_id in (s['session_id'], pathlib.Path(s.get('transcript', '')).stem):
+                return s
+    if cwd:
         cwd_sessions = [s for s in sessions if s.get('cwd', '').startswith(cwd)]
         if cwd_sessions:
             cwd_sessions.sort(key=lambda s: s.get('last_ts') or '', reverse=True)
-            match = cwd_sessions[0]
+            return cwd_sessions[0]
+    return None
+
+
+def cmd_hop(query=None, dry_run=False, handoff=None):
+    match = _find_hop_session(scan_transcripts(), query,
+                              os.environ.get('CLAUDE_CODE_SESSION_ID'), os.getcwd())
     if not match:
         print(f"No session found{' matching ' + repr(query) if query else ' for ' + os.getcwd()}", file=sys.stderr)
         sys.exit(1)
@@ -1693,7 +1705,9 @@ def cmd_hop(query=None, dry_run=False, handoff=None):
     if dry_run:
         clean = _strip_wrapping_quotes(title)
         self_path = os.path.abspath(__file__)
-        line = f'{sys.executable} {shlex.quote(self_path)} hop {shlex.quote(clean)}'
+        # Pass the session ID, not the title: titles can repeat or be substrings
+        # of each other, so a title query can resolve to a different session.
+        line = f'{sys.executable} {shlex.quote(self_path)} hop {shlex.quote(match["session_id"])}'
         if handoff:
             line += f' --handoff {shlex.quote(handoff)}'
         copied = _copy_to_clipboard(line)

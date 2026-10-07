@@ -1,6 +1,8 @@
 # Plan: task-manager integrations (Linear, YouTrack, plugins)
 
-Status: **Phase 0 + 1 done** (2026-10-07). Live API check pending tokens; Phase 2 next.
+Status: **Phases 0–3 done** (2026-10-07). Live check against real Linear/YouTrack is pending
+Peter's tokens in `.env`; everything else is tested (unit tests + the real UI in tmux
+against a fake tracker plugin).
 
 ## Goal
 
@@ -209,6 +211,13 @@ thread) updates it. Default TTL 10 min, configurable. It never stores tokens.
   sessions, the view shows that and offers the next session number instead of
   `.001`.
 
+As built: `_task_pick_loop` (one screen, used by Ctrl+T and `csm new`),
+`_task_worker` (background `recent()` + debounced `search()`; results the
+tracker matched on other fields stay visible), `_next_session_number`.
+Shared with the main picker: `_init_curses`, `_sync_size`, `_run_curses` (Esc
+delay 25 ms instead of curses' default 1 s, which also fixed a laggy Esc in
+the main picker), `_flash`.
+
 ## Phase 3: shell completion
 
 - `csm completion zsh|bash` prints a completion script; you add one `source`
@@ -216,6 +225,16 @@ thread) updates it. Default TTL 10 min, configurable. It never stores tokens.
 - `csm new <TAB>` completes keys with titles as descriptions (zsh shows them),
   read from the cache through a hidden `csm _complete new <prefix>` that never
   touches the network, so TAB stays instant.
+- As built: the script turns the `csm` alias into a function (shells don't
+  complete aliases). The folder's own project comes first, then newest. A
+  cache older than `CACHE_TTL` (600 s) starts a detached `csm _refresh-cache`.
+  Tested in real zsh 5.8 and bash via tmux.
+
+## Next ideas (not planned yet)
+
+- Prefetch on picker start so Ctrl+T opens with fresh data.
+- Show the tracker status of the selected session's ticket in the detail panel.
+- More adapters (Jira, GitHub Issues) as separate files.
 
 ## Decisions (Peter, 2026-10-07)
 

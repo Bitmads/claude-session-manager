@@ -212,6 +212,23 @@ somewhere else.
 
 Check it with `csm connections`.
 
+## 8. Shell completion (optional)
+
+`csm new SET-1<TAB>` completes ticket keys with their titles (needs step 7).
+
+```bash
+# zsh, in ~/.zshrc after compinit (and after your csm alias):
+source <(csm completion zsh)
+
+# bash, in ~/.bashrc:
+source <(csm completion bash)
+```
+
+The script replaces the `csm` alias with a shell function of the same name,
+because zsh and bash don't complete aliases. Completion reads the local cache
+in `~/.claude/csm-cache/`, which `csm tasks`, `csm new` and the picker fill;
+a cache older than 10 minutes refreshes in the background.
+
 ## Verify
 
 ```bash

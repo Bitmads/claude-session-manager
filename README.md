@@ -51,6 +51,7 @@ Full-screen curses UI. Sessions grouped by task, sorted by recency. Right-side c
 | Tab | Toggle scope: Current directory / All |
 | Shift+Tab | Cycle view: Grouped-Date, Grouped-A-Z, Flat-Date, Flat-A-Z |
 | Type | Fuzzy search filter |
+| Ctrl+T | New session from a tracker task (search + details) |
 | Ctrl+E | Rename selected session |
 | Ctrl+O | Add note to selected task |
 | Ctrl+S | Cycle task status (open/wip/done/blocked) |
@@ -83,6 +84,18 @@ csm new VIS-12/2          # → claude -n "VIS-12/2.001: <ticket title from YouT
 
 If the lookup fails (no connection, bad token, not found) it says why and
 starts nothing. See [Task trackers](#task-trackers).
+
+**Don't know the ticket number?** Run `csm new` with nothing after it (or press
+Ctrl+T in the picker). It opens a search over the current folder's project: a
+task list with a detail pane (status, assignee, link, description). Type to
+filter; the tracker is searched live after a short pause. Enter starts the
+session (if the ticket already has sessions, it picks the next number). Tab
+lets you edit the title first. Esc goes back.
+
+**TAB completion:** add `source <(csm completion zsh)` to `~/.zshrc` (or
+`bash` / `~/.bashrc`). Then `csm new SET-1<TAB>` completes ticket keys with
+their titles. It reads a local cache, so TAB never waits on the network; a
+stale cache refreshes itself in the background.
 
 ### Task trackers
 
@@ -257,8 +270,8 @@ The bottom panel (toggle with Ctrl+D) shows for the selected session:
 
 ## Roadmap
 
-Task-tracker integrations: `csm new SET-1234` title lookup is done; task search
-in the picker and shell completion are next. See
+Task-tracker integrations are done: title lookup, task search in the picker,
+and shell completion. Ideas for what's next are in
 **[docs/plans/task-integrations.md](docs/plans/task-integrations.md)**.
 
 ## Contributing

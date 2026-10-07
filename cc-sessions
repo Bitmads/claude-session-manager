@@ -6,8 +6,10 @@ Interactive curses picker to browse, search, and resume sessions.
 Usage:
     cc-sessions                              Interactive picker
     cc-sessions new TICKET[/PHASE] [Title]   Start new session (title fetched if omitted)
+    cc-sessions new                          Pick a tracker task for this folder, then start
     cc-sessions tasks [TEXT] [--from NAME]   List/search tracker tasks for this folder
     cc-sessions connections                  Show trackers, folders, auth status
+    cc-sessions completion zsh|bash          Print shell completion (csm new <TAB>)
     cc-sessions hop [TITLE|ID] [--handoff FILE] [--message TEXT] [--dry-run]
                                              Hop to next session version
     cc-sessions del TITLE|ID                 Delete a session transcript
@@ -1091,7 +1093,7 @@ def _tty_size():
         return 24, 80
 
 
-def _pick_loop(stdscr, state):
+def _init_curses(stdscr):
     curses.start_color()
     curses.use_default_colors()
     curses.curs_set(0)
@@ -1109,6 +1111,36 @@ def _pick_loop(stdscr, state):
     curses.init_pair(_CP_BAR_ACC, curses.COLOR_CYAN, -1)  # used with A_REVERSE
     curses.init_pair(_CP_PANEL_CYAN, curses.COLOR_CYAN, 235)
 
+
+def _flash(stdscr, max_y, max_x, message):
+    """Show a one-line message on the bottom row until a key or 3 seconds."""
+    try:
+        stdscr.addstr(max_y - 1, 0, ' ' * (max_x - 1), curses.color_pair(_CP_YELLOW))
+        stdscr.addstr(max_y - 1, 0, message[:max_x - 1], curses.color_pair(_CP_YELLOW) | curses.A_BOLD)
+    except curses.error:
+        pass
+    stdscr.refresh()
+    stdscr.timeout(3000)
+    stdscr.getch()
+    stdscr.timeout(250)
+
+
+def _sync_size(stdscr):
+    """curses' idea of the size can lag the real terminal; trust the tty."""
+    real_h, real_w = _tty_size()
+    cur_h, cur_w = stdscr.getmaxyx()
+    if real_w != cur_w or real_h != cur_h:
+        try:
+            curses.resizeterm(real_h, real_w)
+        except curses.error:
+            pass
+        stdscr.clear()
+    return stdscr.getmaxyx()
+
+
+def _pick_loop(stdscr, state):
+    _init_curses(stdscr)
+
     scope = 'cwd'
     view_idx = 0
     query = ''
@@ -1121,16 +1153,7 @@ def _pick_loop(stdscr, state):
     while True:
         sessions = state['sessions']
 
-        real_h, real_w = _tty_size()
-        cur_h, cur_w = stdscr.getmaxyx()
-        if real_w != cur_w or real_h != cur_h:
-            try:
-                curses.resizeterm(real_h, real_w)
-            except curses.error:
-                pass
-            stdscr.clear()
-
-        max_y, max_x = stdscr.getmaxyx()
+        max_y, max_x = _sync_size(stdscr)
 
         if max_y < 3 or max_x < 40:
             stdscr.erase()
@@ -1199,7 +1222,7 @@ def _pick_loop(stdscr, state):
             panel_top = list_start + list_h
             _draw_detail_panel(stdscr, panel_top, max_x, panel_h, cur_session, sessions)
 
-        hints = '  Tab: scope  ⇧Tab: view  ^E: rename  ^O: note  ^S: status  ^X: del  ^R: refresh  ^D: panel' if not query else ''
+        hints = '  Tab: scope  ⇧Tab: view  ^T: new from task  ^E: rename  ^O: note  ^S: status  ^X: del  ^R: refresh  ^D: panel' if not query else ''
         right_info = f' {n_sel}/{total}{hints} '
         rule_attr = curses.color_pair(_CP_CYAN)
         label_attr = curses.color_pair(_CP_BAR_ACC) | curses.A_REVERSE
@@ -1292,6 +1315,15 @@ def _pick_loop(stdscr, state):
             state['sessions'] = scan_transcripts()
             state['sig'] = _transcript_signature()
             stdscr.clear()
+        elif ch == 20:  # Ctrl+T = new session from a tracker task
+            conn, tscope = route(None, os.getcwd())
+            if not conn:
+                _flash(stdscr, max_y, max_x, f" No tracker for {os.getcwd()} (see `csm connections`)")
+            else:
+                title = _task_pick_loop(stdscr, conn, tscope, sessions)
+                if title:
+                    return {'new_title': title}
+            stdscr.clear()
         elif ch == 4:  # Ctrl+D = toggle detail panel
             show_panel = not show_panel
             stdscr.clear()
@@ -1301,7 +1333,204 @@ def _pick_loop(stdscr, state):
             scroll = 0
 
 
+# ── Task picker (new session from a tracker task) ───────────────────
+
+def _next_session_number(sessions, ticket, phase=1):
+    """Next free session number for ticket/phase among existing session titles."""
+    best = 0
+    for s in sessions:
+        g = _parse_title(s.get('title') or '') or {}
+        if (g.get('ticket') or '').upper() == ticket.upper() and str(g.get('phase')) == str(phase):
+            try:
+                best = max(best, int(g.get('session') or 0))
+            except ValueError:
+                pass
+    return best + 1
+
+
+def _task_matches(query, t):
+    return _fuzzy_match(query, f"{t['key']} {t['title']}")
+
+
+def _sorted_tasks(tasks):
+    return sorted(tasks, key=lambda t: t.get('updated') or '', reverse=True)
+
+
+def _task_worker(ts, conn, scope, stop_evt):
+    """Background fetches for the task picker: recent() once, then search()
+    for the latest query after the user pauses typing (debounce)."""
+    want_recent = True
+    done_query = None
+    while not stop_evt.wait(0.1):
+        with ts['lock']:
+            q, q_at = ts['query'], ts['query_at']
+        try:
+            if want_recent:
+                want_recent = False
+                ts['status'] = 'loading…'
+                found = list_tasks(conn, scope, None, 50)
+            elif q and q != done_query and time.time() - q_at > 0.4:
+                done_query = q
+                ts['status'] = f'searching "{q}"…'
+                found = list_tasks(conn, scope, q, 30)
+            else:
+                continue
+            with ts['lock']:
+                for t in found:
+                    ts['tasks'][t['key']] = t
+                if q and done_query == q:
+                    # the tracker may match on fields we don't filter on locally
+                    ts['hits'][q] = {t['key'] for t in found}
+            ts['status'] = ''
+        except TaskSourceError as e:
+            ts['status'] = str(e)
+        except Exception as e:
+            ts['status'] = f'error: {e}'
+
+
+def _wrap(text, width):
+    import textwrap
+    out = []
+    for para in (text or '').splitlines():
+        out.extend(textwrap.wrap(para, width) or [''])
+    return out
+
+
+def _draw_task_detail(win, top, left, h, w, t, sessions):
+    cyan = curses.color_pair(_CP_CYAN) | curses.A_BOLD
+    dim = curses.A_DIM
+    lines = [(f"{t['key']}", cyan)]
+    lines += [(l, curses.A_BOLD) for l in _wrap(t['title'], w)]
+    meta = '  '.join(x for x in (t['status'], t['assignee'], (t['updated'] or '')[:10]) if x)
+    if meta:
+        lines.append((meta, dim))
+    if t['url']:
+        lines.append((t['url'][:w], dim))
+    n = _next_session_number(sessions, t['key'])
+    if n > 1:
+        lines.append((f"{n - 1} existing session(s); Enter starts .{n:03d}", curses.color_pair(_CP_YELLOW)))
+    lines.append(('', 0))
+    lines += [(l, 0) for l in _wrap(t['description'], w)]
+    for i, (text, attr) in enumerate(lines[:h]):
+        try:
+            win.addstr(top + i, left, text[:w], attr)
+        except curses.error:
+            pass
+
+
+def _task_pick_loop(stdscr, conn, scope, sessions):
+    """Search/pick a task. Returns a full session title, or None on Esc."""
+    curses.curs_set(0)
+    stdscr.timeout(150)
+    ts = {'lock': threading.Lock(), 'query': '', 'query_at': 0.0, 'status': '', 'hits': {},
+          'tasks': {t['key']: t for t in _cache_get(conn)
+                    if not scope or t.get('project', '').upper() == scope.upper()}}
+    stop_evt = threading.Event()
+    threading.Thread(target=_task_worker, args=(ts, conn, scope, stop_evt), daemon=True).start()
+    query, cursor, scroll = '', 0, 0
+    try:
+        while True:
+            max_y, max_x = _sync_size(stdscr)
+            with ts['lock']:
+                tasks = _sorted_tasks(ts['tasks'].values())
+                hits = ts['hits'].get(query, set())
+            if query:
+                tasks = [t for t in tasks if t['key'] in hits or _task_matches(query, t)]
+            cursor = max(0, min(cursor, len(tasks) - 1))
+            side = max_x >= 100
+            list_w = max_x * 55 // 100 if side else max_x - 1
+            list_h = max_y - 4 if side else max(3, (max_y - 4) // 2)
+            if cursor < scroll:
+                scroll = cursor
+            elif cursor >= scroll + list_h:
+                scroll = cursor - list_h + 1
+
+            stdscr.erase()
+            head = f" New session from {conn}{' / ' + scope if scope else ''}"
+            keys = "Enter: start  Tab: edit title  Esc: back "
+            try:
+                stdscr.addstr(0, 0, ' ' * (max_x - 1), curses.color_pair(_CP_BAR))
+                stdscr.addstr(0, 0, head[:max_x - 1], curses.color_pair(_CP_BAR) | curses.A_BOLD)
+                if len(head) + len(keys) < max_x - 1:
+                    stdscr.addstr(0, max_x - len(keys) - 1, keys, curses.color_pair(_CP_BAR))
+            except curses.error:
+                pass
+            for i in range(list_h):
+                ri = scroll + i
+                if ri >= len(tasks):
+                    break
+                t = tasks[ri]
+                attr = curses.color_pair(_CP_SEL) | curses.A_BOLD if ri == cursor else 0
+                st = f"{t['status'][:12]:<12} " if t['status'] else ''
+                line = f" {t['key']:<10} {st}{t['title']}"
+                try:
+                    stdscr.addstr(1 + i, 0, line[:list_w].ljust(list_w), attr)
+                except curses.error:
+                    pass
+            if tasks:
+                if side:
+                    _draw_task_detail(stdscr, 1, list_w + 2, max_y - 4, max_x - list_w - 3, tasks[cursor], sessions)
+                else:
+                    _draw_task_detail(stdscr, 1 + list_h + 1, 1, max_y - list_h - 6, max_x - 2, tasks[cursor], sessions)
+            elif not ts['status']:
+                try:
+                    stdscr.addstr(2, 2, "No tasks." if not query else "No match yet; searching the tracker…", curses.A_DIM)
+                except curses.error:
+                    pass
+            info = f" {len(tasks)} tasks {('· ' + ts['status']) if ts['status'] else ''} "
+            try:
+                stdscr.addstr(max_y - 3, 0, '─' * (max_x - 1), curses.color_pair(_CP_CYAN))
+                stdscr.addstr(max_y - 3, 2, info[:max_x - 4], curses.color_pair(_CP_BAR_ACC) | curses.A_REVERSE)
+                stdscr.addstr(max_y - 2, 0, '❯ ', curses.color_pair(_CP_CYAN) | curses.A_BOLD)
+                stdscr.addstr(max_y - 2, 2, query[:max_x - 3])
+                stdscr.addstr(max_y - 1, 0, '─' * (max_x - 1), curses.color_pair(_CP_CYAN))
+            except curses.error:
+                pass
+            stdscr.refresh()
+
+            ch = stdscr.getch()
+            if ch == -1 or ch == curses.KEY_RESIZE:
+                continue
+            if ch in (27, 3):
+                return None
+            if ch in (curses.KEY_UP, 16):
+                cursor = max(0, cursor - 1)
+            elif ch in (curses.KEY_DOWN, 14):
+                cursor += 1
+            elif ch in (curses.KEY_ENTER, 10, 13, 9) and tasks:
+                t = tasks[cursor]
+                title = _new_session_title(t['key'], 1, _next_session_number(sessions, t['key']),
+                                           t['title'].strip())
+                if ch == 9:  # Tab = edit before starting
+                    title = _text_input(stdscr, max_y, max_x, ' Title: ', title)
+                    if not title:
+                        continue
+                return title
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                query = query[:-1]
+                cursor = scroll = 0
+            elif 32 <= ch <= 126:
+                query += chr(ch)
+                cursor = scroll = 0
+            else:
+                continue
+            with ts['lock']:
+                ts['query'], ts['query_at'] = query, time.time()
+    finally:
+        stop_evt.set()
+        stdscr.timeout(250)
+
+
 # ── Picker command ───────────────────────────────────────────────────
+
+def _run_curses(fn):
+    """curses.wrapper with a short Esc delay (default is 1s, so Esc felt laggy)."""
+    os.environ.setdefault('ESCDELAY', '25')
+    try:
+        return curses.wrapper(fn)
+    except curses.error:
+        return None
+
 
 def _bg_refresh(state, stop_evt):
     """Watch transcripts; re-scan only when the cheap signature changes."""
@@ -1328,14 +1557,14 @@ def cmd_pick():
     worker.start()
 
     try:
-        selected = curses.wrapper(lambda stdscr: _pick_loop(stdscr, state))
-    except curses.error:
-        selected = None
+        selected = _run_curses(lambda stdscr: _pick_loop(stdscr, state))
     finally:
         stop_evt.set()
 
     if not selected:
         return
+    if selected.get('new_title'):
+        _start_new(selected['new_title'])
 
     sid = selected['session_id']
     cwd = selected.get('cwd', '')
@@ -1840,9 +2069,29 @@ def cmd_new(text):
             print(f"csm: {ticket} not found in {conn}", file=sys.stderr)
             sys.exit(1)
         ticket, title = task['key'] or ticket, task['title'].strip()
-    full_title = _new_session_title(ticket, phase, session, title)
+    _start_new(_new_session_title(ticket, phase, session, title))
+
+
+def _start_new(full_title):
     print(f"→ {full_title}", file=sys.stderr)
     os.execvp('claude', ['claude', '-n', full_title])
+
+
+def cmd_new_pick():
+    """`csm new` with no arguments: pick a task for this folder, then start."""
+    conn, scope = route(None, os.getcwd())
+    if not conn:
+        print(f"No tracker connection for {os.getcwd()} (see `csm connections`).", file=sys.stderr)
+        print("Usage: csm new TICKET[/PHASE[.SESSION]] [Title]", file=sys.stderr)
+        sys.exit(1)
+    sessions = scan_transcripts()
+
+    def run(stdscr):
+        _init_curses(stdscr)
+        return _task_pick_loop(stdscr, conn, scope, sessions)
+    title = _run_curses(run)
+    if title:
+        _start_new(title)
 
 
 # ── Delete ──────────────────────────────────────────────────────────
@@ -2045,6 +2294,104 @@ def cmd_hop(query=None, dry_run=False, handoff=None, message=None):
         os.execvp('claude', ['claude', '-n', new_title, prompt])
 
 
+# ── Shell completion ────────────────────────────────────────────────
+
+CACHE_TTL = 600  # seconds before completion triggers a background refresh
+_SUBCOMMANDS = ['new', 'hop', 'tasks', 'connections', 'status', 'note', 'del', 'config', 'completion']
+
+
+def _cache_age(conn):
+    try:
+        return time.time() - json.loads(_cache_path(conn).read_text()).get("ts", 0)
+    except Exception:
+        return float('inf')
+
+
+def complete_tasks(prefix, cwd):
+    """Cached tasks whose key starts with prefix; the folder's project first.
+    Never touches the network; a stale cache is refreshed in the background."""
+    here, scope = route(None, cwd)
+    if here and _cache_age(here) > CACHE_TTL:
+        try:
+            subprocess.Popen([sys.executable, os.path.realpath(__file__), '_refresh-cache'],
+                             cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            pass
+    out = []
+    for conn in _connections():
+        for t in _cache_get(conn):
+            if t['key'].upper().startswith(prefix.upper()):
+                local = conn == here and (not scope or t.get('project', '').upper() == scope.upper())
+                out.append((not local, t))
+    out.sort(key=lambda x: x[1].get('updated') or '', reverse=True)  # newest first...
+    out.sort(key=lambda x: x[0])  # ...and (stable) this folder's project before others
+    return [t for _, t in out[:100]]
+
+
+def cmd_complete(args):
+    if len(args) >= 1 and args[0] == 'new':
+        prefix = args[1] if len(args) > 1 else ''
+        plain = '--plain' in args
+        for t in complete_tasks(prefix, os.getcwd()):
+            if plain:
+                print(t['key'])
+            else:  # zsh _describe format "value:description" (keys never contain ':')
+                print(f"{t['key']}:{t['title'].strip()}")
+
+
+def cmd_refresh_cache():
+    conn, scope = route(None, os.getcwd())
+    if conn:
+        try:
+            list_tasks(conn, scope, None, 100)
+        except TaskSourceError:
+            pass
+
+
+_ZSH_COMPLETION = r'''# csm zsh completion. Add to ~/.zshrc (after compinit):  source <(csm completion zsh)
+# Replaces the `csm` alias with a function so zsh can complete it.
+unalias csm 2>/dev/null
+csm() { __PY__ __SCRIPT__ "$@"; }
+_csm() {
+  if (( CURRENT == 2 )); then
+    local -a cmds; cmds=(__CMDS__)
+    _describe -t commands 'csm command' cmds
+  elif (( CURRENT == 3 )) && [[ ${words[2]} == new ]]; then
+    local -a items
+    items=("${(@f)$(__PY__ __SCRIPT__ _complete new "${words[3]}" 2>/dev/null)}")
+    [[ -n ${items[1]} ]] && _describe -t tasks 'task' items
+  fi
+}
+compdef _csm csm
+'''
+
+_BASH_COMPLETION = r'''# csm bash completion. Add to ~/.bashrc:  source <(csm completion bash)
+# Replaces the `csm` alias with a function so bash can complete it.
+unalias csm 2>/dev/null
+csm() { __PY__ __SCRIPT__ "$@"; }
+_csm() {
+  local cur=${COMP_WORDS[COMP_CWORD]}
+  if (( COMP_CWORD == 1 )); then
+    COMPREPLY=($(compgen -W "__CMDS__" -- "$cur"))
+  elif (( COMP_CWORD == 2 )) && [[ ${COMP_WORDS[1]} == new ]]; then
+    COMPREPLY=($(__PY__ __SCRIPT__ _complete new "$cur" --plain 2>/dev/null))
+  fi
+}
+complete -F _csm csm
+'''
+
+
+def cmd_completion(shell):
+    tpl = {'zsh': _ZSH_COMPLETION, 'bash': _BASH_COMPLETION}.get(shell or '')
+    if not tpl:
+        print("Usage: csm completion zsh|bash", file=sys.stderr)
+        sys.exit(1)
+    print(tpl.replace('__PY__', shlex.quote(sys.executable))
+             .replace('__SCRIPT__', shlex.quote(os.path.realpath(__file__)))
+             .replace('__CMDS__', ' '.join(_SUBCOMMANDS)), end='')
+
+
 # ── Config command ──────────────────────────────────────────────────
 
 def cmd_config(init=False):
@@ -2085,9 +2432,9 @@ def main():
         cmd_hook()
     elif cmd == 'new':
         if len(args) < 2:
-            print("Usage: csm new TICKET[/PHASE[.SESSION]] [Title]", file=sys.stderr)
-            sys.exit(1)
-        cmd_new(' '.join(args[1:]))
+            cmd_new_pick()
+        else:
+            cmd_new(' '.join(args[1:]))
     elif cmd in ('del', 'delete', 'rm'):
         if len(args) < 2:
             print("Usage: csm del <title-or-session-id>", file=sys.stderr)
@@ -2120,6 +2467,12 @@ def main():
         cmd_tasks(' '.join(rest) or None, conn)
     elif cmd == 'connections':
         cmd_connections()
+    elif cmd == 'completion':
+        cmd_completion(args[1] if len(args) > 1 else None)
+    elif cmd == '_complete':
+        cmd_complete(args[1:])
+    elif cmd == '_refresh-cache':
+        cmd_refresh_cache()
     elif cmd == 'status':
         if len(args) < 2:
             print("Usage: cc-sessions status <task> [open|wip|done|blocked]", file=sys.stderr)

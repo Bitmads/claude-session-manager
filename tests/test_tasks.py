@@ -270,5 +270,56 @@ class TestNew(_ConfigCase):
         ex.assert_not_called()
 
 
+class TestCompletion(_ConfigCase):
+    def seed(self):
+        ccs._cache_put("lin", [ccs._norm_task({"key": "SET-1", "title": "old", "project": "SET", "updated": "2026-01-01"}),
+                               ccs._norm_task({"key": "SET-2", "title": "new", "project": "SET", "updated": "2026-09-01"})])
+        ccs._cache_put("yt", [ccs._norm_task({"key": "SET-9", "title": "other tracker", "project": "SET", "updated": "2026-12-01"}),
+                              ccs._norm_task({"key": "VIS-5", "title": "vis", "project": "VIS", "updated": "2026-10-01"})])
+
+    def test_folder_project_first_then_newest(self):
+        self.seed()
+        with mock.patch.object(ccs.subprocess, "Popen"):
+            keys = [t["key"] for t in ccs.complete_tasks("SET", "/dev/settlemate")]
+        self.assertEqual(keys, ["SET-2", "SET-1", "SET-9"])
+
+    def test_prefix_filter_is_case_insensitive(self):
+        self.seed()
+        with mock.patch.object(ccs.subprocess, "Popen"):
+            self.assertEqual([t["key"] for t in ccs.complete_tasks("vis", "/tmp")], ["VIS-5"])
+
+    def test_fresh_cache_does_not_refresh_but_stale_does(self):
+        self.seed()
+        with mock.patch.object(ccs.subprocess, "Popen") as po:
+            ccs.complete_tasks("", "/dev/settlemate")
+        po.assert_not_called()
+        with mock.patch.object(ccs, "CACHE_TTL", -1), mock.patch.object(ccs.subprocess, "Popen") as po:
+            ccs.complete_tasks("", "/dev/settlemate")
+        po.assert_called_once()
+
+    def test_completion_scripts_render(self):
+        import io, contextlib
+        for shell in ("zsh", "bash"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ccs.cmd_completion(shell)
+            out = buf.getvalue()
+            self.assertIn("_complete new", out)
+            self.assertNotIn("__PY__", out)
+            self.assertNotIn("__SCRIPT__", out)
+
+
+class TestNextSessionNumber(unittest.TestCase):
+    def setUp(self):
+        _reset_config()
+
+    def test_counts_only_same_ticket_and_phase(self):
+        sessions = [{"title": "SET-1/1.001: A"}, {"title": "SET-1/1.004: A"},
+                    {"title": "SET-1/2.009: A"}, {"title": "SET-10/1.007: B"}, {"title": "plain"}]
+        self.assertEqual(ccs._next_session_number(sessions, "SET-1"), 5)
+        self.assertEqual(ccs._next_session_number(sessions, "set-1", 2), 10)
+        self.assertEqual(ccs._next_session_number(sessions, "SET-2"), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

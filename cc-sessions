@@ -5,8 +5,10 @@ Interactive curses picker to browse, search, and resume sessions.
 
 Usage:
     cc-sessions                              Interactive picker
-    cc-sessions new TICKET [/PHASE] Title    Start new session (normalized)
-    cc-sessions hop [TITLE|ID] [--handoff FILE] [--dry-run]
+    cc-sessions new TICKET[/PHASE] [Title]   Start new session (title fetched if omitted)
+    cc-sessions tasks [TEXT] [--from NAME]   List/search tracker tasks for this folder
+    cc-sessions connections                  Show trackers, folders, auth status
+    cc-sessions hop [TITLE|ID] [--handoff FILE] [--message TEXT] [--dry-run]
                                              Hop to next session version
     cc-sessions del TITLE|ID                 Delete a session transcript
     cc-sessions status TASK [STATUS]          Get/set task status
@@ -1484,32 +1486,362 @@ def cmd_status(task_query, new_status=None):
         print(f"{icon} {match_key}: {cur}")
 
 
+# ── Task sources (adapter layer) ────────────────────────────────────
+#
+# Trackers (Linear, YouTrack, ...) plug in as adapter files; the core never
+# names a tracker. See docs/plans/task-integrations.md.
+#
+#   adapters/<name>.py       built-in adapters, shipped with csm
+#   ~/.claude/csm/adapters/  user plugins (same contract; may override built-ins)
+#
+# Adapter contract (duck-typed; adapters never import this file):
+#   module-level  ADAPTERS = [Class, ...]
+#   Class.kind                     registry name, used as connections.<name>.type
+#   Class(options, http)           options = connection config + resolved "token"
+#   .get(key)                  ->  task dict or None if not found     (required)
+#   .search(text, limit, scope) -> [task dict]                         (optional)
+#   .recent(limit, scope)      ->  [task dict] open tasks, newest first (optional)
+#   .whoami()                  ->  str, used by `csm connections`       (optional)
+# scope is the tracker-side project (Linear team key, YouTrack project code).
+# A task dict has "key" and "title"; see TASK_FIELDS for the rest.
+
+TASK_FIELDS = ('key', 'title', 'url', 'status', 'assignee', 'project',
+               'description', 'updated')
+SCRIPT_DIR = pathlib.Path(os.path.realpath(__file__)).parent
+ADAPTER_DIRS = [SCRIPT_DIR / "adapters", CLAUDE_DIR / "csm" / "adapters"]
+CACHE_DIR = CLAUDE_DIR / "csm-cache"
+_TICKET_RE = re.compile(r'^([A-Za-z][A-Za-z0-9]*)-(\d+)$')
+
+
+class TaskSourceError(Exception):
+    """Any failure talking to a tracker, with a message fit for the user."""
+
+
+class HttpError(TaskSourceError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+class Http:
+    """Tiny stdlib JSON-over-HTTP helper injected into adapters."""
+    Error = HttpError
+
+    def __init__(self, timeout=10):
+        self.timeout = timeout
+
+    def request(self, method, url, params=None, body=None, headers=None):
+        import urllib.request, urllib.parse, urllib.error
+        if params:
+            url += ('&' if '?' in url else '?') + urllib.parse.urlencode(params)
+        data = json.dumps(body).encode() if body is not None else None
+        hdrs = {'Accept': 'application/json', 'User-Agent': 'csm'}
+        if data is not None:
+            hdrs['Content-Type'] = 'application/json'
+        hdrs.update(headers or {})
+        req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                raw = r.read()
+        except urllib.error.HTTPError as e:
+            host = urllib.parse.urlsplit(url).netloc
+            if e.code in (401, 403):
+                raise HttpError(e.code, f"{host} rejected the token (HTTP {e.code}); check it in {_env_file()}")
+            detail = e.read()[:300].decode('utf-8', 'replace').strip()
+            raise HttpError(e.code, f"HTTP {e.code} from {host}: {detail}")
+        except (urllib.error.URLError, OSError) as e:
+            raise HttpError(0, f"cannot reach {urllib.parse.urlsplit(url).netloc}: {e}")
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            raise HttpError(0, f"non-JSON response from {urllib.parse.urlsplit(url).netloc}")
+
+    def get_json(self, url, params=None, headers=None):
+        return self.request('GET', url, params=params, headers=headers)
+
+    def post_json(self, url, body, headers=None):
+        return self.request('POST', url, body=body, headers=headers)
+
+
+def _env_file():
+    p = os.environ.get("CSM_ENV_FILE")
+    return pathlib.Path(p) if p else SCRIPT_DIR / ".env"
+
+
+def _read_env_file(path):
+    """Parse KEY=VALUE lines (optional `export`, quotes, # comments)."""
+    out = {}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        k = k.strip()
+        if k.startswith('export '):
+            k = k[7:].strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'':
+            v = v[1:-1]
+        out[k] = v
+    return out
+
+
+def _secret(name):
+    """Real environment wins over .env."""
+    if not name:
+        return ''
+    return os.environ.get(name) or _read_env_file(_env_file()).get(name, '')
+
+
+_REGISTRY = None
+
+
+def _adapter_registry():
+    """kind -> class, from every *.py in ADAPTER_DIRS (later dirs override)."""
+    global _REGISTRY
+    if _REGISTRY is not None:
+        return _REGISTRY
+    import importlib.util
+    reg = {}
+    for d in ADAPTER_DIRS:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.py")):
+            if f.name.startswith('_'):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(f"csm_adapter_{f.stem}", f)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                for cls in getattr(mod, 'ADAPTERS', []):
+                    if not getattr(cls, 'kind', None) or not callable(getattr(cls, 'get', None)):
+                        raise TypeError(f"{cls!r} needs a `kind` and a get(key) method")
+                    reg[cls.kind] = cls
+            except Exception as e:
+                print(f"csm: skipping adapter {f}: {e}", file=sys.stderr)
+    _REGISTRY = reg
+    return reg
+
+
+def _connections():
+    return _load_config().get("connections") or {}
+
+
+_SOURCES = {}
+
+
+def make_source(name):
+    """Factory: connection name -> adapter instance (memoized)."""
+    if name in _SOURCES:
+        return _SOURCES[name]
+    conn = _connections().get(name)
+    if not conn:
+        raise TaskSourceError(f"no connection named {name!r} in {_config_path()}")
+    cls = _adapter_registry().get(conn.get("type"))
+    if not cls:
+        known = ', '.join(sorted(_adapter_registry())) or 'none found'
+        raise TaskSourceError(f"connection {name!r}: unknown type {conn.get('type')!r} (adapters: {known})")
+    options = dict(conn)
+    token_env = conn.get("token_env")
+    if token_env:
+        options["token"] = _secret(token_env)
+        if not options["token"]:
+            raise TaskSourceError(f"connection {name!r}: {token_env} is not set (add it to {_env_file()})")
+    _SOURCES[name] = cls(options, Http())
+    return _SOURCES[name]
+
+
+def route(key=None, cwd=None):
+    """Which (connection, scope) serves a ticket key or a folder, or (None, None).
+
+    1. the key's prefix is in a connection's "prefixes"  (works from any folder)
+    2. the longest "folders" path that contains cwd
+    """
+    conns = _connections()
+    if key:
+        m = _TICKET_RE.match(key)
+        if m:
+            prefix = m.group(1).upper()
+            for name, c in conns.items():
+                if prefix in [p.upper() for p in c.get("prefixes", [])]:
+                    return name, prefix
+    if cwd:
+        cwd = os.path.realpath(cwd)
+        best = None
+        for f in _load_config().get("folders") or []:
+            p = os.path.realpath(os.path.expanduser(f.get("path", "")))
+            if p and (cwd == p or cwd.startswith(p.rstrip(os.sep) + os.sep)):
+                if not best or len(p) > len(best[0]):
+                    best = (p, f)
+        if best:
+            return best[1].get("connection"), best[1].get("scope")
+    return None, None
+
+
+def _norm_task(t):
+    return {k: ('' if t.get(k) is None else str(t.get(k))) for k in TASK_FIELDS}
+
+
+def _cache_path(conn):
+    return CACHE_DIR / f"{sanitize(conn)}.json"
+
+
+def _cache_put(conn, tasks):
+    if not tasks:
+        return
+    path = _cache_path(conn)
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except Exception:
+        data = {}
+    items = data.get("tasks", {})
+    for t in tasks:
+        items[t["key"]] = t
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"ts": time.time(), "tasks": items}))
+
+
+def _cache_get(conn):
+    try:
+        return list(json.loads(_cache_path(conn).read_text()).get("tasks", {}).values())
+    except Exception:
+        return []
+
+
+def fetch_task(key, conn):
+    src = make_source(conn)
+    try:
+        t = src.get(key)
+    except TaskSourceError:
+        raise
+    except Exception as e:
+        raise TaskSourceError(f"{conn}: {e}")
+    if not t:
+        return None
+    t = _norm_task(t)
+    _cache_put(conn, [t])
+    return t
+
+
+def list_tasks(conn, scope=None, text=None, limit=20):
+    src = make_source(conn)
+    method = 'search' if text else 'recent'
+    fn = getattr(src, method, None)
+    if not callable(fn):
+        raise TaskSourceError(f"connection {conn!r} ({type(src).kind}) does not support {method}")
+    try:
+        tasks = fn(text, limit, scope) if text else fn(limit, scope)
+    except TaskSourceError:
+        raise
+    except Exception as e:
+        raise TaskSourceError(f"{conn}: {e}")
+    tasks = [_norm_task(t) for t in tasks or []]
+    _cache_put(conn, tasks)
+    return tasks
+
+
+def _fmt_task_line(t):
+    status = f"[{t['status']}] " if t['status'] else ''
+    return f"{C_BCYAN}{t['key']}{C_RESET}  {C_DIM}{status}{C_RESET}{t['title']}"
+
+
+def cmd_tasks(text=None, conn=None):
+    scope = None
+    if not conn:
+        conn, scope = route(None, os.getcwd())
+    if not conn:
+        print(f"No connection for {os.getcwd()}. Add a \"folders\" entry in {_config_path()}, "
+              f"or pass --from NAME.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        tasks = list_tasks(conn, scope, text)
+    except TaskSourceError as e:
+        print(f"csm: {e}", file=sys.stderr)
+        sys.exit(1)
+    for t in tasks:
+        print(_fmt_task_line(t))
+    if not tasks:
+        print("(no tasks)", file=sys.stderr)
+
+
+def cmd_connections():
+    conns = _connections()
+    reg = _adapter_registry()
+    print(f"Adapters: {', '.join(sorted(reg)) or '(none)'}")
+    print(f"Secrets:  {_env_file()}{'' if _env_file().exists() else '  (missing)'}")
+    if not conns:
+        print(f"No connections configured in {_config_path()}")
+        return
+    folders = _load_config().get("folders") or []
+    for name, c in conns.items():
+        try:
+            src = make_source(name)
+            who = getattr(src, 'whoami', None)
+            state = f"OK ({who()})" if callable(who) else "OK (configured)"
+        except Exception as e:
+            state = f"FAIL: {e}"
+        pref = ','.join(c.get("prefixes", [])) or '-'
+        print(f"\n{C_BWHITE}{name}{C_RESET}  type={c.get('type')}  prefixes={pref}  {state}")
+        for f in folders:
+            if f.get("connection") == name:
+                print(f"  {f.get('path')}  scope={f.get('scope') or '-'}")
+
+
 # ── New session ─────────────────────────────────────────────────────
 
 def _parse_new_input(text):
-    text = text.strip()
-    m = re.match(r'^([A-Za-z]+-\d+)/(\d+)\.(\d+):?\s+(.+)$', text)
-    if m:
-        return m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
-    m = re.match(r'^([A-Za-z]+-\d+)/(\d+):?\s+(.+)$', text)
-    if m:
-        return m.group(1), int(m.group(2)), 1, m.group(3)
-    m = re.match(r'^([A-Za-z]+-\d+):?\s+(.+)$', text)
-    if m:
-        return m.group(1), 1, 1, m.group(2)
-    return None
+    """'SET-123', 'SET-123/2', 'SET-123/2.005', each optionally followed by a title.
+
+    Returns (ticket, phase, session, title_or_None), or None if there's no ticket.
+    """
+    m = re.match(r'^([A-Za-z][A-Za-z0-9]*-\d+)(?:/(\d+)(?:\.(\d+))?)?:?(?:\s+(.*))?$', text.strip())
+    if not m:
+        return None
+    title = (m.group(4) or '').strip() or None
+    return m.group(1), int(m.group(2) or 1), int(m.group(3) or 1), title
+
+
+def _new_session_title(ticket, phase, session, title):
+    """Render with the configured naming.full_template (DRY with hop/grouping).
+    A custom template that doesn't use these fields falls back to the default."""
+    groups = {'ticket': ticket, 'phase': str(phase), 'session': str(session), 'title': title}
+    for tpl in (_naming().get("full_template"), DEFAULT_CONFIG["naming"]["full_template"]):
+        out = _render_title(tpl or '', groups, 'session') if tpl else None
+        if out:
+            return out
+    return f"{ticket}/{phase}.{session:03d}: {title}"
 
 
 def cmd_new(text):
     parsed = _parse_new_input(text)
     if not parsed:
-        print("Usage: csm new 'TICKET Title' or 'TICKET/PHASE Title'", file=sys.stderr)
-        print("  e.g. csm new 'SET-123 Implement settlements'", file=sys.stderr)
-        print("       csm new 'SET-123/2 Implement settlements'", file=sys.stderr)
+        print("Usage: csm new TICKET[/PHASE[.SESSION]] [Title]", file=sys.stderr)
+        print("  e.g. csm new SET-123                 (title fetched from the tracker)", file=sys.stderr)
+        print("       csm new 'SET-123 Implement settlements'", file=sys.stderr)
         print("       csm new 'SET-123/2.005: Implement settlements'", file=sys.stderr)
         sys.exit(1)
     ticket, phase, session, title = parsed
-    full_title = f"{ticket}/{phase}.{session:03d}: {title}"
+    if not title:
+        conn, _ = route(ticket, os.getcwd())
+        if not conn:
+            print(f"No title given and no tracker connection for {ticket} "
+                  f"(see `csm connections`). Pass a title: csm new '{ticket} Title'", file=sys.stderr)
+            sys.exit(1)
+        try:
+            task = fetch_task(ticket, conn)
+        except TaskSourceError as e:
+            print(f"csm: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not task:
+            print(f"csm: {ticket} not found in {conn}", file=sys.stderr)
+            sys.exit(1)
+        ticket, title = task['key'] or ticket, task['title'].strip()
+    full_title = _new_session_title(ticket, phase, session, title)
+    print(f"→ {full_title}", file=sys.stderr)
     os.execvp('claude', ['claude', '-n', full_title])
 
 
@@ -1622,12 +1954,13 @@ def _bump_version(title):
     return f"{key} - v002"
 
 
-def _hop_prompt(title, session_id, transcript, handoff=None):
+def _hop_prompt(title, session_id, transcript, handoff=None, message=None):
     """Opening prompt for the continuation session.
 
     The transcript is the primary context and must be read; the handoff doc is
     an addition, never a replacement. (A version that told the new session to
-    only grep the transcript made it lose almost all context.)
+    only grep the transcript made it lose almost all context.) message is the
+    user's own text from `/hop <text>`, appended verbatim.
     """
     prompt = (
         f'Read the previous session transcript at {transcript} '
@@ -1636,7 +1969,10 @@ def _hop_prompt(title, session_id, transcript, handoff=None):
     )
     if handoff:
         prompt += f'Also read the handoff document written at the end of that session: {handoff}. '
-    return prompt + 'Continue where we left off.'
+    prompt += 'Continue where we left off.'
+    if message:
+        prompt += f'\n\nMessage from the user for this session:\n{message}'
+    return prompt
 
 
 def _find_hop_session(sessions, query=None, current_id=None, cwd=None):
@@ -1675,7 +2011,7 @@ def _find_hop_session(sessions, query=None, current_id=None, cwd=None):
     return None
 
 
-def cmd_hop(query=None, dry_run=False, handoff=None):
+def cmd_hop(query=None, dry_run=False, handoff=None, message=None):
     match = _find_hop_session(scan_transcripts(), query,
                               os.environ.get('CLAUDE_CODE_SESSION_ID'), os.getcwd())
     if not match:
@@ -1692,13 +2028,15 @@ def cmd_hop(query=None, dry_run=False, handoff=None):
             print(f"Handoff file not found: {handoff}", file=sys.stderr)
             sys.exit(1)
     prompt = _hop_prompt(_strip_wrapping_quotes(title), match.get('session_id', ''),
-                         transcript, handoff)
+                         transcript, handoff, message)
     if dry_run:
         clean = _strip_wrapping_quotes(title)
         self_path = os.path.abspath(__file__)
         line = f'{sys.executable} {shlex.quote(self_path)} hop {shlex.quote(clean)}'
         if handoff:
             line += f' --handoff {shlex.quote(handoff)}'
+        if message:
+            line += f' --message {shlex.quote(message)}'
         copied = _copy_to_clipboard(line)
         print(line)
         if copied:
@@ -1747,7 +2085,7 @@ def main():
         cmd_hook()
     elif cmd == 'new':
         if len(args) < 2:
-            print("Usage: csm new 'TICKET Title'", file=sys.stderr)
+            print("Usage: csm new TICKET[/PHASE[.SESSION]] [Title]", file=sys.stderr)
             sys.exit(1)
         cmd_new(' '.join(args[1:]))
     elif cmd in ('del', 'delete', 'rm'):
@@ -1756,7 +2094,7 @@ def main():
             sys.exit(1)
         cmd_del(' '.join(args[1:]))
     elif cmd == 'hop':
-        dry, handoff, rest = False, None, []
+        dry, handoff, message, rest = False, None, None, []
         it = iter(args[1:])
         for a in it:
             if a == '--dry-run':
@@ -1766,9 +2104,22 @@ def main():
                 if not handoff:
                     print("Usage: csm hop [TITLE|ID] --handoff FILE", file=sys.stderr)
                     sys.exit(1)
+            elif a == '--message':
+                message = (next(it, None) or '').strip() or None
             else:
                 rest.append(a)
-        cmd_hop(' '.join(rest) if rest else None, dry_run=dry, handoff=handoff)
+        cmd_hop(' '.join(rest) if rest else None, dry_run=dry, handoff=handoff, message=message)
+    elif cmd == 'tasks':
+        conn, rest = None, []
+        it = iter(args[1:])
+        for a in it:
+            if a == '--from':
+                conn = next(it, None)
+            else:
+                rest.append(a)
+        cmd_tasks(' '.join(rest) or None, conn)
+    elif cmd == 'connections':
+        cmd_connections()
     elif cmd == 'status':
         if len(args) < 2:
             print("Usage: cc-sessions status <task> [open|wip|done|blocked]", file=sys.stderr)

@@ -73,6 +73,34 @@ csm new "SET-123/2.005: Implement settlements"
 
 All input formats normalize to `TICKET/PHASE.SESSION: Title`.
 
+**Leave the title out** and csm fetches it from your task tracker (Linear,
+YouTrack, or any adapter you add). The full title is used, never shortened:
+
+```bash
+csm new SET-1234          # → claude -n "SET-1234/1.001: <ticket title from Linear>"
+csm new VIS-12/2          # → claude -n "VIS-12/2.001: <ticket title from YouTrack>"
+```
+
+If the lookup fails (no connection, bad token, not found) it says why and
+starts nothing. See [Task trackers](#task-trackers).
+
+### Task trackers
+
+```bash
+csm connections           # trackers, which folders use them, live auth check
+csm tasks                 # open tasks for the current folder's project
+csm tasks map tiles       # search them
+csm tasks --from linear   # use a specific connection
+```
+
+Which tracker a ticket or folder uses is set in `~/.claude/csm.json`:
+`connections` (one per tracker account, owning ticket `prefixes`) and
+`folders` (folder → connection + project `scope`). Tokens go in `.env`
+(see `.env.example`). Setup: [INSTALLATION.md](INSTALLATION.md#7-task-trackers-optional).
+
+Adding a tracker is one file in `adapters/` (or `~/.claude/csm/adapters/`),
+no core changes. See [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-tracker-adapter).
+
 ### Hop to next session (context continuation)
 
 When context runs out, use `/hop` inside Claude Code or run from CLI:
@@ -81,7 +109,8 @@ When context runs out, use `/hop` inside Claude Code or run from CLI:
 csm hop                                    # the calling session (inside Claude), else newest in cwd
 csm hop "SET-123/1.003: Implement..."      # specific session by title
 csm hop 5897ff98                           # by session ID prefix
-csm hop --handoff docs/HANDOFF.md          # new session reads this doc first
+csm hop --handoff docs/HANDOFF.md          # new session also reads this doc
+csm hop --message "don't deploy yet"       # extra message appended to the new session's prompt
 csm hop --dry-run                          # print command without executing
 ```
 
@@ -92,6 +121,7 @@ don't get mixed up. A title query prefers an exact title match over a partial on
 Bumps the session number: `SET-123/1.003` → `SET-123/1.004` and starts a new
 Claude session. Its opening prompt tells Claude to read the previous
 transcript and, if `--handoff` is given, also the handoff doc, then continue.
+`--message` text is appended under "Message from the user for this session:".
 
 The `/hop` skill does three things in the current session before hopping:
 
@@ -100,6 +130,10 @@ The `/hop` skill does three things in the current session before hopping:
    files, commands, decisions, user feedback, gotchas, live state).
 3. Runs `csm hop --dry-run --handoff <doc>` and replies with only the command
    line to paste (also copied to the clipboard if configured).
+
+Text after `/hop` is passed to the next session unchanged as `--message`:
+`/hop start with the failing test, don't deploy` ends up in the new session's
+first message.
 
 ### Task status
 
@@ -203,6 +237,7 @@ The bottom panel (toggle with Ctrl+D) shows for the selected session:
 ## Architecture
 
 - Single Python script, stdlib only (`curses`, `json`, `pathlib`, `re`, etc.)
+- Tracker adapters as separate stdlib-only files in `adapters/`
 - No pip packages, no fzf, no external dependencies
 - Reads Claude Code transcripts from `~/.claude/projects/*/`
 - Task notes in `~/.claude/task-notes/*.md`
@@ -219,6 +254,12 @@ The bottom panel (toggle with Ctrl+D) shows for the selected session:
 ~/.claude/trash/*.jsonl          → trashed session transcripts
 ~/.claude/skills/hop/SKILL.md    → /hop skill for Claude Code
 ```
+
+## Roadmap
+
+Task-tracker integrations: `csm new SET-1234` title lookup is done; task search
+in the picker and shell completion are next. See
+**[docs/plans/task-integrations.md](docs/plans/task-integrations.md)**.
 
 ## Contributing
 

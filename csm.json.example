@@ -7,5 +7,23 @@
     "full_template": "{ticket}/{phase}.{session:03d}: {title}",
     "group_template": "{ticket}/{phase}: {title}",
     "bump_field": "session"
-  }
+  },
+  "connections": {
+    "linear": {
+      "type": "linear",
+      "token_env": "LINEAR_API_KEY",
+      "prefixes": ["SET"]
+    },
+    "youtrack": {
+      "type": "youtrack",
+      "url": "https://example.youtrack.cloud",
+      "token_env": "YOUTRACK_TOKEN",
+      "prefixes": ["VIS", "BIT"]
+    }
+  },
+  "folders": [
+    { "path": "~/dev/settlemate", "connection": "linear", "scope": "SET" },
+    { "path": "~/dev/visited",    "connection": "youtrack", "scope": "VIS" },
+    { "path": "~/dev/bitmads",    "connection": "youtrack", "scope": "BIT" }
+  ]
 }

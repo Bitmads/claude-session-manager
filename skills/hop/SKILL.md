@@ -5,8 +5,11 @@ description: Update docs, write a detailed handoff, then print the command that 
 
 # Hop — Session Continuation
 
-When the user invokes /hop, do these three steps in order. Anything the user
-typed after `/hop` is extra focus for steps 1 and 2.
+When the user invokes /hop, do these three steps in order.
+
+Anything the user typed after `/hop` is a message for the NEXT session, not an
+instruction for this one. Don't act on it here; pass it through unchanged in
+step 3. It can be empty.
 
 ## 1. Bring the docs up to date
 
@@ -67,8 +70,12 @@ Sections, in this order (write "none" rather than dropping a section):
 Run this, with the absolute path of the handoff from step 2:
 
 ```bash
-python3 /media/nvme4tb/DEV/claude-session-manager/cc-sessions hop --dry-run --handoff "<handoff path>"
+python3 /media/nvme4tb/DEV/claude-session-manager/cc-sessions hop --dry-run --handoff "<handoff path>" --message '<text after /hop>'
 ```
+
+`--message` carries the user's text after `/hop` verbatim: same words, no
+rewording, no additions. Wrap it in single quotes and write each `'` inside it
+as `'\''`. If the user typed nothing after `/hop`, leave `--message` out.
 
 Your final message must be exactly the command line it prints on stdout, as
 plain text: no code fence, no heading, no summary, nothing before or after it.

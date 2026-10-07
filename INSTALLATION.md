@@ -170,9 +170,52 @@ Titles that don't match your pattern still work — `csm` falls back to a generi
 
 Remember: in JSON, backslashes in the regex must be doubled (`\\d`, not `\d`).
 
+## 7. Task trackers (optional)
+
+Lets `csm new SET-1234` fetch the ticket title. Built-in adapters: Linear and
+YouTrack.
+
+**Tokens** go in `.env` next to `cc-sessions` (gitignored):
+
+```bash
+cp .env.example .env     # then fill in the values
+```
+
+- Linear: Settings → Security & access → Personal API keys → New API key.
+  Read access is enough.
+- YouTrack: avatar → Profile → Account Security → New token, scope "YouTrack".
+
+Real environment variables override `.env`. Use `$CSM_ENV_FILE` to point
+somewhere else.
+
+**Connections and folders** go in `~/.claude/csm.json` (see `csm.json.example`):
+
+```json
+{
+  "connections": {
+    "linear":   { "type": "linear", "token_env": "LINEAR_API_KEY", "prefixes": ["SET"] },
+    "youtrack": { "type": "youtrack", "url": "https://example.youtrack.cloud",
+                  "token_env": "YOUTRACK_TOKEN", "prefixes": ["VIS", "BIT"] }
+  },
+  "folders": [
+    { "path": "~/dev/settlemate", "connection": "linear",   "scope": "SET" },
+    { "path": "~/dev/visited",    "connection": "youtrack", "scope": "VIS" }
+  ]
+}
+```
+
+- `prefixes`: ticket keys this connection owns. `csm new SET-12` routes by
+  prefix from any folder.
+- `folders`: which connection, and which project (`scope`: Linear team key or
+  YouTrack project code) the folder uses. The longest matching path wins. This
+  drives `csm tasks` and is the fallback when a prefix isn't listed.
+
+Check it with `csm connections`.
+
 ## Verify
 
 ```bash
 csm config        # show effective config + where it's read from
+csm connections   # tracker connections + auth check (if configured)
 csm               # launch the picker
 ```

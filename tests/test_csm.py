@@ -229,6 +229,15 @@ class TestHopPrompt(unittest.TestCase):
         self.assertIn("/h/HANDOFF.md", out)
         self.assertNotIn("grep", out)
 
+    def test_message_appended_verbatim(self):
+        out = ccs._hop_prompt("T", "id", "/t/x.jsonl", "/h/H.md", "don't deploy yet")
+        self.assertTrue(out.startswith(self.OLD))
+        self.assertTrue(out.endswith("Message from the user for this session:\ndon't deploy yet"))
+
+    def test_no_message_leaves_prompt_unchanged(self):
+        self.assertEqual(ccs._hop_prompt("T", "id", "/t/x.jsonl", None, None),
+                         ccs._hop_prompt("T", "id", "/t/x.jsonl"))
+
 
 class TestFindHopSession(unittest.TestCase):
     S = [

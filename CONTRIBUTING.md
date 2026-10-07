@@ -5,13 +5,21 @@ this guide keeps it that way.
 
 ## The one rule: stdlib only
 
-`cc-sessions` is a **single Python 3 file with zero dependencies** — only the
-standard library. That's a feature, not a limitation. Please don't add pip
-packages, build steps, or external binaries. If something seems to need a
-dependency, open an issue first; there's usually a stdlib way.
+Everything is **Python 3 with zero dependencies**, only the standard library.
+That's a feature, not a limitation. Please don't add pip packages, build
+steps, or external binaries. If something seems to need a dependency, open an
+issue first; there's usually a stdlib way.
 
 - Target **Python 3.8+**.
-- One file: `cc-sessions`. No package, no `setup.py`, no framework.
+- **Core = one file:** `cc-sessions`. No package, no `setup.py`, no framework.
+  It must run on its own, with no adapters present.
+- **Task-manager adapters = one file each** in `adapters/` (Linear, YouTrack,
+  ...). Adding a tracker means adding a file there (or in
+  `~/.claude/csm/adapters/`), never editing the core. Adapters don't import
+  the core; they get an `http` helper injected. See
+  [docs/plans/task-integrations.md](docs/plans/task-integrations.md).
+- **Secrets live in `.env`** (gitignored). `.env.example` lists every variable
+  and is committed.
 - Match the surrounding style (naming, ~4-space indent, the `_private` helper
   convention, the section-comment banners).
 
@@ -53,6 +61,33 @@ the non-interactive commands on every push/PR — keep it green.
   fragile wrappers.
 - **Terminal width** comes from `ioctl(TIOCGWINSZ)` on `/dev/tty`; the picker
   live-refreshes via a cheap mtime signature. Keep both cheap.
+
+## Adding a tracker adapter
+
+One file in `adapters/` (or `~/.claude/csm/adapters/` for a private one). No
+core edits. Use `adapters/linear.py` and `adapters/youtrack.py` as templates.
+
+```python
+class Jira:
+    kind = "jira"                        # connections.<name>.type in csm.json
+
+    def __init__(self, options, http):   # options = connection config + "token"
+        self.http = http                 # injected: get_json / post_json, raises http.Error
+
+    def get(self, key):                  # REQUIRED: task dict, or None if not found
+        return {"key": key, "title": "...", "url": "", "status": "",
+                "assignee": "", "project": "", "description": "", "updated": ""}
+
+    # optional: search(text, limit, scope), recent(limit, scope), whoami()
+
+ADAPTERS = [Jira]
+```
+
+- Don't import `cc-sessions`; everything you need is injected.
+- `scope` is the tracker-side project for the current folder (may be `None`).
+- Return `None` from `get` for "not found"; raise for anything else.
+- Add tests in `tests/test_tasks.py` with a `FakeHttp` (no network). The
+  contract test there covers every file in `adapters/` automatically.
 
 ## Demo assets (gif / video)
 

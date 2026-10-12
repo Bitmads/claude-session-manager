@@ -1222,7 +1222,7 @@ def _pick_loop(stdscr, state):
             panel_top = list_start + list_h
             _draw_detail_panel(stdscr, panel_top, max_x, panel_h, cur_session, sessions)
 
-        hints = '  Tab: scope  ⇧Tab: view  ^T: new from task  ^E: rename  ^O: note  ^S: status  ^X: del  ^R: refresh  ^D: panel' if not query else ''
+        hints = '  Tab: scope  ⇧Tab: view  ^T: new from task  ^G: hop  ^E: rename  ^O: note  ^S: status  ^X: del  ^R: refresh  ^D: panel' if not query else ''
         right_info = f' {n_sel}/{total}{hints} '
         rule_attr = curses.color_pair(_CP_CYAN)
         label_attr = curses.color_pair(_CP_BAR_ACC) | curses.A_REVERSE
@@ -1314,6 +1314,11 @@ def _pick_loop(stdscr, state):
         elif ch == 18:  # Ctrl+R = force refresh
             state['sessions'] = scan_transcripts()
             state['sig'] = _transcript_signature()
+            stdscr.clear()
+        elif ch == 7 and cur_session:  # Ctrl+G = hop: continue this session in a new one
+            msg = _text_input(stdscr, max_y, max_x, ' Hop. Message for the next session (Enter: none, Esc: cancel): ')
+            if msg is not None:
+                return {'hop': cur_session, 'message': msg or None}
             stdscr.clear()
         elif ch == 20:  # Ctrl+T = new session from a tracker task
             conn, tscope = route(None, os.getcwd())
@@ -1565,6 +1570,13 @@ def cmd_pick():
         return
     if selected.get('new_title'):
         _start_new(selected['new_title'])
+    if selected.get('hop'):
+        src = selected['hop']
+        cwd = src.get('cwd', '')
+        print(f"{C_BOLD}Hopping:{C_RESET} {src.get('title')} → {_bump_version(src.get('title') or 'Untitled')}")
+        if cwd and os.path.isdir(cwd):
+            os.chdir(cwd)
+        _hop_session(src, message=selected.get('message'))
 
     sid = selected['session_id']
     cwd = selected.get('cwd', '')
@@ -2266,7 +2278,11 @@ def cmd_hop(query=None, dry_run=False, handoff=None, message=None):
     if not match:
         print(f"No session found{' matching ' + repr(query) if query else ' for ' + os.getcwd()}", file=sys.stderr)
         sys.exit(1)
+    _hop_session(match, dry_run, handoff, message)
 
+
+def _hop_session(match, dry_run=False, handoff=None, message=None):
+    """Start (or, with dry_run, print the command for) the continuation of a session."""
     title = match.get('title') or 'Untitled'
     new_title = _bump_version(title)
     transcript = match.get('transcript', '')

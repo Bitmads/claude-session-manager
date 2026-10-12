@@ -52,6 +52,7 @@ Full-screen curses UI. Sessions grouped by task, sorted by recency. Right-side c
 | Shift+Tab | Cycle view: Grouped-Date, Grouped-A-Z, Flat-Date, Flat-A-Z |
 | Type | Fuzzy search filter |
 | Ctrl+T | New session from a tracker task (search + details) |
+| Ctrl+G | Hop: continue the selected session in a new one (asks for an optional message) |
 | Ctrl+E | Rename selected session |
 | Ctrl+O | Add note to selected task |
 | Ctrl+S | Cycle task status (open/wip/done/blocked) |
@@ -143,6 +144,11 @@ The `/hop` skill does three things in the current session before hopping:
    files, commands, decisions, user feedback, gotchas, live state).
 3. Runs `csm hop --dry-run --handoff <doc>` and replies with only the command
    line to paste (also copied to the clipboard if configured).
+
+In the picker, **Ctrl+G** hops the selected session: it asks for an optional
+message, then starts the next session in that session's folder. It can't write
+a handoff or update docs (only the old session itself can, via `/hop`), so use
+it for sessions that are already closed.
 
 Text after `/hop` is passed to the next session unchanged as `--message`:
 `/hop start with the failing test, don't deploy` ends up in the new session's

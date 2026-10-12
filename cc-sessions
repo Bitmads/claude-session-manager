@@ -57,13 +57,11 @@ DEFAULT_CONFIG = {
     },
     "hop_prompt": {
         # Stop hook: once per session, when context reaches `percent`, Claude
-        # asks whether to hop. Needs the Stop hook (INSTALLATION.md).
+        # asks whether to hop. Needs the Stop hook + status-line tap (INSTALLATION.md).
         "enabled": True,
         "percent": 88,
-        # Your model's context window in tokens (200000 or 1000000). Usage is
-        # read from the session transcript; the window size isn't in there.
-        # 0 = unknown: fall back to a status-line reading if one exists, else
-        # stay silent rather than guess.
+        # Only used when no status-line reading exists for the session: window
+        # size in tokens to estimate from the transcript. 0 = don't estimate.
         "context_window": 0,
     },
 }
@@ -1710,7 +1708,7 @@ def cmd_note(task=None, text=None):
 
 # ── Hooks ───────────────────────────────────────────────────────────
 
-CTX_DIR = CLAUDE_DIR / "csm-cache" / "ctx"          # optional status-line tap
+CTX_DIR = CLAUDE_DIR / "csm-cache" / "ctx"          # written by the status line
 HOP_ASKED_DIR = CLAUDE_DIR / "csm-cache" / "hop-asked"
 
 HOP_ASK_REASON = (
@@ -1757,23 +1755,18 @@ def _transcript_context_tokens(transcript_path):
 
 
 def _context_percent(session_id, transcript_path, cfg):
-    """Context used, in percent, or None if unknown.
-
-    Primary: tokens from the session's own transcript (the hook is handed its
-    path) over the configured window size. Verified equal to the status line's
-    used_percentage, which is computed from the same token counts.
-    Fallback, only when no window size is configured: a reading saved by an
-    optional status-line tap."""
+    """Context used, in percent, or None if unknown. Prefers the status line's
+    own number (exact); estimates from the transcript only if a window size is
+    configured."""
+    try:
+        return float(_session_file(CTX_DIR, session_id).read_text().strip())
+    except (OSError, ValueError):
+        pass
     window = cfg.get("context_window") or 0
     if window and transcript_path:
         tokens = _transcript_context_tokens(transcript_path)
         if tokens:
             return tokens / window * 100
-    if not window:
-        try:
-            return float(_session_file(CTX_DIR, session_id).read_text().strip())
-        except (OSError, ValueError):
-            pass
     return None
 
 

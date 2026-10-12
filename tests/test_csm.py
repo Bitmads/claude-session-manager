@@ -362,13 +362,5 @@ class TestHopPromptHook(unittest.TestCase):
         _reset_config(); os.environ["CSM_CONFIG"] = str(self.cfg)
         self.assertIn("Context is at 90%", self.run_hook(None, transcript_path=str(tp))["reason"])
 
-    def test_configured_window_uses_transcript_not_status_line(self):
-        tp = pathlib.Path(self.tmp.name) / "t.jsonl"
-        tp.write_text(json.dumps({"type": "assistant", "message": {"usage": {"cache_read_input_tokens": 100000}}}))
-        self.cfg.write_text(json.dumps({"hop_prompt": {"context_window": 1000000}}))
-        _reset_config(); os.environ["CSM_CONFIG"] = str(self.cfg)
-        # status-line file says 99%, transcript says 10%: the transcript wins
-        self.assertIsNone(self.run_hook(99, transcript_path=str(tp)))
-
 if __name__ == "__main__":
     unittest.main(verbosity=2)

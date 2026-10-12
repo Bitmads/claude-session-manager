@@ -295,5 +295,72 @@ class TestPickerKeys(unittest.TestCase):
         for needed in ("hop", "new", "rename", "note", "status", "delete", "panel", "search", "help"):
             self.assertIn(needed, acts)
 
+
+class TestHopPromptHook(unittest.TestCase):
+    """Stop hook: ask once per session when context reaches the threshold."""
+
+    def setUp(self):
+        _reset_config()
+        self.tmp = tempfile.TemporaryDirectory()
+        d = pathlib.Path(self.tmp.name)
+        self.cfg = d / "csm.json"
+        os.environ["CSM_CONFIG"] = str(self.cfg)
+        self.ctx, self.asked = d / "ctx", d / "asked"
+        self.ctx.mkdir()
+        self._orig = (ccs.CTX_DIR, ccs.HOP_ASKED_DIR)
+        ccs.CTX_DIR, ccs.HOP_ASKED_DIR = self.ctx, self.asked
+
+    def tearDown(self):
+        ccs.CTX_DIR, ccs.HOP_ASKED_DIR = self._orig
+        _reset_config()
+        self.tmp.cleanup()
+
+    def run_hook(self, pct=None, **payload):
+        import io, contextlib
+        if pct is not None:
+            (self.ctx / "s1").write_text(str(pct))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ccs._hook_stop(dict({"session_id": "s1", "hook_event_name": "Stop"}, **payload))
+        return json.loads(buf.getvalue()) if buf.getvalue() else None
+
+    def test_below_threshold_is_silent(self):
+        self.assertIsNone(self.run_hook(87.9))
+        self.assertFalse(self.asked.exists())
+
+    def test_at_threshold_blocks_once(self):
+        out = self.run_hook(88)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("Context is at 88%", out["reason"])
+        self.assertIn("AskUserQuestion", out["reason"])
+        self.assertIsNone(self.run_hook(95))  # already asked in this session
+
+    def test_stop_hook_active_never_blocks(self):
+        self.assertIsNone(self.run_hook(99, stop_hook_active=True))
+        self.assertFalse(self.asked.exists())
+
+    def test_disabled_and_custom_percent(self):
+        self.cfg.write_text(json.dumps({"hop_prompt": {"enabled": False}}))
+        self.assertIsNone(self.run_hook(99))
+        _reset_config(); os.environ["CSM_CONFIG"] = str(self.cfg)
+        self.cfg.write_text(json.dumps({"hop_prompt": {"enabled": True, "percent": 50}}))
+        self.assertEqual(self.run_hook(51)["decision"], "block")
+
+    def test_no_reading_means_no_guess(self):
+        self.assertIsNone(self.run_hook(None, transcript_path="/nonexistent"))
+
+    def test_transcript_estimate_only_with_configured_window(self):
+        tp = pathlib.Path(self.tmp.name) / "t.jsonl"
+        rows = [{"type": "assistant", "message": {"usage": {"input_tokens": 10, "cache_read_input_tokens": 100000}}},
+                {"type": "assistant", "isSidechain": True, "message": {"usage": {"input_tokens": 999999}}},
+                {"type": "assistant", "message": {"usage": {"input_tokens": 0, "cache_creation_input_tokens": 500,
+                                                            "cache_read_input_tokens": 179500}}}]
+        tp.write_text("\n".join(json.dumps(r) for r in rows))
+        self.assertEqual(ccs._transcript_context_tokens(str(tp)), 180000)
+        self.assertIsNone(self.run_hook(None, transcript_path=str(tp)))
+        self.cfg.write_text(json.dumps({"hop_prompt": {"context_window": 200000}}))
+        _reset_config(); os.environ["CSM_CONFIG"] = str(self.cfg)
+        self.assertIn("Context is at 90%", self.run_hook(None, transcript_path=str(tp))["reason"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

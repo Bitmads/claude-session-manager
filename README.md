@@ -150,6 +150,10 @@ The `/hop` skill does three things in the current session before hopping:
 3. Runs `csm hop --dry-run --handoff <doc>` and replies with only the command
    line to paste (also copied to the clipboard if configured).
 
+**Ask at 88%:** with the optional Stop hook, Claude asks once per session
+whether to hop when context reaches 88%, and you can add a note for the next
+session. Setup: [INSTALLATION.md](INSTALLATION.md#9-ask-to-hop-when-context-fills-up-optional).
+
 In the picker, **`h`** (or Ctrl+G) hops the selected session: it asks for an optional
 message, then starts the next session in that session's folder. It can't write
 a handoff or update docs (only the old session itself can, via `/hop`), so use

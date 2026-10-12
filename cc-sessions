@@ -55,6 +55,15 @@ DEFAULT_CONFIG = {
         # Which named group `hop` increments (must be numeric).
         "bump_field": "session",
     },
+    "hop_prompt": {
+        # Stop hook: once per session, when context reaches `percent`, Claude
+        # asks whether to hop. Needs the Stop hook + status-line tap (INSTALLATION.md).
+        "enabled": True,
+        "percent": 88,
+        # Only used when no status-line reading exists for the session: window
+        # size in tokens to estimate from the transcript. 0 = don't estimate.
+        "context_window": 0,
+    },
 }
 
 _CONFIG = None
@@ -1699,6 +1708,88 @@ def cmd_note(task=None, text=None):
 
 # ── Hooks ───────────────────────────────────────────────────────────
 
+CTX_DIR = CLAUDE_DIR / "csm-cache" / "ctx"          # written by the status line
+HOP_ASKED_DIR = CLAUDE_DIR / "csm-cache" / "hop-asked"
+
+HOP_ASK_REASON = (
+    "Context is at {pct}% (hop threshold: {limit}%). Before you end this turn, ask the user "
+    "whether to hop to a new session now. Use the AskUserQuestion tool with one question, "
+    "\"Context is at {pct}%. Hop to a new session now?\", and two options: \"Hop now\" and "
+    "\"Not now\". Say in the question that they can choose Other and type a note for the next "
+    "session. If the tool is unavailable, ask in plain text instead.\n"
+    "- \"Hop now\": run the hop skill (Skill tool, skill \"hop\") with no arguments.\n"
+    "- Other with typed text: treat it as yes and run the hop skill with that text, unchanged, "
+    "as its arguments.\n"
+    "- \"Not now\": do nothing more about hopping, don't bring it up again in this session, "
+    "and end the turn."
+)
+
+
+def _session_file(directory, session_id):
+    return directory / sanitize(session_id)
+
+
+def _transcript_context_tokens(transcript_path):
+    """Input-side tokens of the last main-thread assistant message: the same
+    formula the status line documents for used_percentage."""
+    last = 0
+    try:
+        with open(transcript_path) as f:
+            for line in f:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get('type') != 'assistant' or d.get('isSidechain'):
+                    continue
+                u = (d.get('message') or {}).get('usage') or {}
+                n = (u.get('input_tokens', 0) + u.get('cache_creation_input_tokens', 0)
+                     + u.get('cache_read_input_tokens', 0))
+                if n:
+                    last = n
+    except OSError:
+        pass
+    return last
+
+
+def _context_percent(session_id, transcript_path, cfg):
+    """Context used, in percent, or None if unknown. Prefers the status line's
+    own number (exact); estimates from the transcript only if a window size is
+    configured."""
+    try:
+        return float(_session_file(CTX_DIR, session_id).read_text().strip())
+    except (OSError, ValueError):
+        pass
+    window = cfg.get("context_window") or 0
+    if window and transcript_path:
+        tokens = _transcript_context_tokens(transcript_path)
+        if tokens:
+            return tokens / window * 100
+    return None
+
+
+def _hook_stop(payload):
+    """Once per session, at the hop threshold, keep the turn open and have
+    Claude ask the user whether to hop. Hooks can't prompt the user themselves."""
+    cfg = _load_config().get("hop_prompt") or {}
+    sid = payload.get('session_id', '')
+    if not cfg.get("enabled") or not sid or payload.get('stop_hook_active'):
+        return
+    asked = _session_file(HOP_ASKED_DIR, sid)
+    if asked.exists():
+        return
+    pct = _context_percent(sid, payload.get('transcript_path', ''), cfg)
+    limit = cfg.get("percent", 88)
+    if pct is None or pct < limit:
+        return
+    asked.parent.mkdir(parents=True, exist_ok=True)
+    asked.write_text(f"{pct:.1f}\n")
+    print(json.dumps({"decision": "block",
+                      "reason": HOP_ASK_REASON.format(pct=int(pct), limit=limit)}))
+
+
 def cmd_hook():
     try:
         payload = json.load(sys.stdin)
@@ -1706,6 +1797,10 @@ def cmd_hook():
         sys.exit(0)
 
     event = payload.get('hook_event_name', '')
+    if event == 'Stop':  # fires every turn: keep it cheap, no task-index logging
+        _hook_stop(payload)
+        return
+
     sid = payload.get('session_id', '')
     cwd = payload.get('cwd', '')
     tp = payload.get('transcript_path', '')

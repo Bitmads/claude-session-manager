@@ -236,21 +236,11 @@ session now?" at the end of its turn. **Hop now** runs `/hop` (docs update,
 handoff, command). Choosing **Other** and typing text hops with that text as
 the note for the next session. **Not now** carries on and doesn't ask again.
 
-Two pieces are needed, because Claude Code gives the context percentage to
-the status line only, not to hooks, and hooks can't show a prompt themselves:
+Hooks can't show a prompt themselves and aren't told the context percentage,
+so the hook reads token usage from the session's own transcript (Claude Code
+hands the hook its path) and Claude does the asking.
 
-**a) Status line tap.** In your status line script, save the percentage per
-session (`$input` is the JSON the script read from stdin):
-
-```bash
-CSM_SID=$(printf '%s' "$input" | jq -r '.session_id // empty')
-CSM_PCT=$(printf '%s' "$input" | jq -r '.context_window.used_percentage // empty')
-if [ -n "$CSM_SID" ] && [ -n "$CSM_PCT" ]; then
-  mkdir -p "$HOME/.claude/csm-cache/ctx" && printf '%s' "$CSM_PCT" > "$HOME/.claude/csm-cache/ctx/$CSM_SID"
-fi
-```
-
-**b) Stop hook** in `~/.claude/settings.json`:
+**a) Stop hook** in `~/.claude/settings.json`:
 
 ```json
 {
@@ -262,16 +252,22 @@ fi
 }
 ```
 
-Settings in `~/.claude/csm.json` (these are the defaults):
+**b) Your context window size** in `~/.claude/csm.json`. The transcript has
+the tokens used but not the window size, so set it once: `200000`, or
+`1000000` for 1M-context models.
 
 ```json
-{ "hop_prompt": { "enabled": true, "percent": 88, "context_window": 0 } }
+{ "hop_prompt": { "enabled": true, "percent": 88, "context_window": 1000000 } }
 ```
 
-No status line? Set `context_window` to your model's window in tokens
-(200000 or 1000000) and csm estimates the percentage from the transcript with
-the same input-tokens formula the status line uses. With `0` and no status
-line reading, the hook stays silent rather than guess.
+The percentage is `input + cache-creation + cache-read tokens` of the last
+reply, divided by the window: the same formula Claude Code's status line uses,
+so it matches the "context %" you see there.
+
+With `context_window` left at `0` the hook stays silent rather than guess.
+(Alternative for that case: have your status line script write
+`context_window.used_percentage` to `~/.claude/csm-cache/ctx/<session_id>`;
+the hook uses that reading when no window size is configured.)
 
 ## Verify
 

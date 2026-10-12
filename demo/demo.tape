@@ -39,10 +39,11 @@ Sleep 1.2s
 Tab
 Sleep 2s
 
-# Fuzzy search
+# Fuzzy search: / enters search mode, Esc clears it
+Type "/"
 Type "oauth"
 Sleep 1.8s
-Backspace 5
+Escape
 Sleep 800ms
 
 # Cycle the view presets with Shift+Tab (Grouped·Date → A-Z → Flat·Date → Flat·A-Z)

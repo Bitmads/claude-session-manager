@@ -264,5 +264,36 @@ class TestFindHopSession(unittest.TestCase):
         s = [dict(self.S[0], session_id="ccc", title="SET-1/1.001: X v2"), self.S[0]]
         self.assertEqual(ccs._find_hop_session(s, "SET-1/1.001: X")["session_id"], "aaa111")
 
+
+class TestPickerKeys(unittest.TestCase):
+    K = staticmethod(lambda c, searching=False: ccs._key_action(ord(c) if isinstance(c, str) else c, searching))
+
+    def test_letters_are_commands_outside_search(self):
+        for key, act in {"h": "hop", "n": "new", "r": "rename", "o": "note", "s": "status",
+                         "d": "delete", "p": "panel", "/": "search", "?": "help", "q": "quit"}.items():
+            self.assertEqual(self.K(key), act)
+        self.assertIsNone(self.K("z"))
+
+    def test_letters_are_text_while_searching(self):
+        for key in "hnrosd/?q z":
+            self.assertEqual(self.K(key, True), "type")
+
+    def test_esc_and_backspace_depend_on_mode(self):
+        self.assertEqual(self.K(27), "quit")
+        self.assertEqual(self.K(27, True), "clear")
+        self.assertEqual(self.K(127, True), "backspace")
+        self.assertIsNone(self.K(127))
+
+    def test_ctrl_keys_work_in_both_modes(self):
+        for code, act in {6: "search", 7: "hop", 20: "new", 5: "rename", 15: "note",
+                          19: "status", 24: "delete", 18: "refresh", 4: "panel", 10: "open"}.items():
+            self.assertEqual(self.K(code), act)
+            self.assertEqual(self.K(code, True), act)
+
+    def test_every_action_in_help_is_reachable(self):
+        acts = set(ccs._KEYS_ANY.values()) | set(ccs._KEYS_NORMAL.values())
+        for needed in ("hop", "new", "rename", "note", "status", "delete", "panel", "search", "help"):
+            self.assertIn(needed, acts)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

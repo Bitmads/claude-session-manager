@@ -45,20 +45,25 @@ Full-screen curses UI. Sessions grouped by task, sorted by recency. Right-side c
 
 | Key | Action |
 |-----|--------|
-| Up/Down | Navigate sessions |
 | Enter | Resume selected session |
-| Esc | Quit |
+| `/` or Ctrl+F | Search: type to filter, Enter resumes, Esc clears |
+| `h` | Hop: continue the selected session in a new one (asks for an optional message) |
+| `n` | New session from a tracker task (search + details) |
+| `r` | Rename selected session |
+| `o` | Add note to selected task |
+| `s` | Cycle task status (open/wip/done/blocked) |
+| `d` | Trash selected session (asks to confirm) |
+| `p` | Toggle detail panel |
+| `?` | Show all keys |
+| Up/Down or `j`/`k` | Navigate sessions |
 | Tab | Toggle scope: Current directory / All |
 | Shift+Tab | Cycle view: Grouped-Date, Grouped-A-Z, Flat-Date, Flat-A-Z |
-| Type | Fuzzy search filter |
-| Ctrl+T | New session from a tracker task (search + details) |
-| Ctrl+G | Hop: continue the selected session in a new one (asks for an optional message) |
-| Ctrl+E | Rename selected session |
-| Ctrl+O | Add note to selected task |
-| Ctrl+S | Cycle task status (open/wip/done/blocked) |
-| Ctrl+X | Trash selected session (asks to confirm) |
-| Ctrl+R | Refresh now (the picker also auto-refreshes) |
-| Ctrl+D | Toggle detail panel |
+| `q` or Esc | Quit |
+
+Search is a mode, so outside it every command is one letter. While searching,
+letters are text; use the Ctrl keys instead, which work in both modes: Ctrl+G
+hop, Ctrl+T new, Ctrl+E rename, Ctrl+O note, Ctrl+S status, Ctrl+X trash,
+Ctrl+D panel, Ctrl+R refresh now (the picker also auto-refreshes).
 
 ### Start a new session
 
@@ -87,7 +92,7 @@ If the lookup fails (no connection, bad token, not found) it says why and
 starts nothing. See [Task trackers](#task-trackers).
 
 **Don't know the ticket number?** Run `csm new` with nothing after it (or press
-Ctrl+T in the picker). It opens a search over the current folder's project: a
+`n` in the picker). It opens a search over the current folder's project: a
 task list with a detail pane (status, assignee, link, description). Type to
 filter; the tracker is searched live after a short pause. Enter starts the
 session (if the ticket already has sessions, it picks the next number). Tab
@@ -145,7 +150,7 @@ The `/hop` skill does three things in the current session before hopping:
 3. Runs `csm hop --dry-run --handoff <doc>` and replies with only the command
    line to paste (also copied to the clipboard if configured).
 
-In the picker, **Ctrl+G** hops the selected session: it asks for an optional
+In the picker, **`h`** (or Ctrl+G) hops the selected session: it asks for an optional
 message, then starts the next session in that session's folder. It can't write
 a handoff or update docs (only the old session itself can, via `/hop`), so use
 it for sessions that are already closed.

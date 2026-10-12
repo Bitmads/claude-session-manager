@@ -1125,6 +1125,72 @@ def _flash(stdscr, max_y, max_x, message):
     stdscr.timeout(250)
 
 
+# Picker keys. Search is a mode (entered with / or Ctrl+F), so outside it every
+# command is one mnemonic letter. The Ctrl keys work in both modes.
+_KEYS_ANY = {
+    curses.KEY_UP: 'up', 16: 'up', curses.KEY_DOWN: 'down', 14: 'down',
+    curses.KEY_ENTER: 'open', 10: 'open', 13: 'open',
+    9: 'scope', curses.KEY_BTAB: 'view', 3: 'quit',
+    6: 'search', 7: 'hop', 20: 'new', 5: 'rename', 15: 'note', 19: 'status',
+    24: 'delete', 18: 'refresh', 4: 'panel',
+}
+_KEYS_NORMAL = {
+    '/': 'search', 'h': 'hop', 'n': 'new', 'r': 'rename', 'o': 'note',
+    's': 'status', 'd': 'delete', 'p': 'panel', 'j': 'down', 'k': 'up',
+    'q': 'quit', '?': 'help',
+}
+_HELP = [
+    ('Enter', 'resume the selected session'),
+    ('/  or Ctrl+F', 'search (type to filter; Enter resumes; Esc clears)'),
+    ('h', 'hop: continue it in a new session (optional message)'),
+    ('n', 'new session from a tracker task'),
+    ('r', 'rename'),
+    ('o', 'add a note to the task'),
+    ('s', 'cycle task status'),
+    ('d', 'delete (asks first)'),
+    ('p', 'show/hide the detail panel'),
+    ('Tab / Shift+Tab', 'scope: this folder or all / change view'),
+    ('j k  or arrows', 'move'),
+    ('q  or Esc', 'quit'),
+    ('', ''),
+    ('While searching', 'Ctrl+G hop, Ctrl+T new, Ctrl+E rename, Ctrl+O note,'),
+    ('', 'Ctrl+S status, Ctrl+X delete, Ctrl+D panel, Ctrl+R refresh'),
+]
+
+
+def _key_action(ch, searching):
+    """Map a key to a picker action name, or None. In search mode printable
+    keys are text ('type'), Esc clears the search, Backspace edits it."""
+    if ch in _KEYS_ANY:
+        return _KEYS_ANY[ch]
+    if searching:
+        if ch == 27:
+            return 'clear'
+        if ch in (curses.KEY_BACKSPACE, 127, 8):
+            return 'backspace'
+        return 'type' if 32 <= ch <= 126 else None
+    if ch == 27:
+        return 'quit'
+    return _KEYS_NORMAL.get(chr(ch)) if 32 <= ch <= 126 else None
+
+
+def _show_help(stdscr, max_y, max_x):
+    stdscr.erase()
+    try:
+        stdscr.addstr(1, 2, 'csm keys', curses.color_pair(_CP_CYAN) | curses.A_BOLD)
+        for i, (key, what) in enumerate(_HELP[:max_y - 5]):
+            stdscr.addstr(3 + i, 2, key[:18], curses.A_BOLD)
+            stdscr.addstr(3 + i, 22, what[:max(0, max_x - 24)])
+        stdscr.addstr(min(max_y - 1, 4 + len(_HELP)), 2, 'any key to go back', curses.A_DIM)
+    except curses.error:
+        pass
+    stdscr.refresh()
+    stdscr.timeout(-1)
+    stdscr.getch()
+    stdscr.timeout(250)
+    stdscr.clear()
+
+
 def _sync_size(stdscr):
     """curses' idea of the size can lag the real terminal; trust the tty."""
     real_h, real_w = _tty_size()
@@ -1144,6 +1210,7 @@ def _pick_loop(stdscr, state):
     scope = 'cwd'
     view_idx = 0
     query = ''
+    searching = False
     cursor = 0
     scroll = 0
     prev_w = prev_h = -1
@@ -1222,8 +1289,9 @@ def _pick_loop(stdscr, state):
             panel_top = list_start + list_h
             _draw_detail_panel(stdscr, panel_top, max_x, panel_h, cur_session, sessions)
 
-        hints = '  Tab: scope  ⇧Tab: view  ^T: new from task  ^G: hop  ^E: rename  ^O: note  ^S: status  ^X: del  ^R: refresh  ^D: panel' if not query else ''
-        right_info = f' {n_sel}/{total}{hints} '
+        hints = ('  Enter: resume  Esc: clear  Ctrl keys still work' if searching else
+                 '  /: search  h: hop  n: new  r: rename  o: note  s: status  d: delete  ?: help')
+        right_info = f' {n_sel}/{total}{hints} '[:max(0, max_x - 2)]
         rule_attr = curses.color_pair(_CP_CYAN)
         label_attr = curses.color_pair(_CP_BAR_ACC) | curses.A_REVERSE
         try:
@@ -1236,9 +1304,11 @@ def _pick_loop(stdscr, state):
         except curses.error:
             pass
         try:
-            stdscr.addstr(max_y - 2, 0, '❯ ', curses.color_pair(_CP_CYAN) | curses.A_BOLD)
-            q_max = max_x - 3
-            stdscr.addstr(max_y - 2, 2, query[:q_max])
+            if searching:
+                stdscr.addstr(max_y - 2, 0, '❯ ', curses.color_pair(_CP_CYAN) | curses.A_BOLD)
+                stdscr.addstr(max_y - 2, 2, query[:max_x - 3] + '▏')
+            else:
+                stdscr.addstr(max_y - 2, 0, '  press / to search', curses.A_DIM)
         except curses.error:
             pass
 
@@ -1247,13 +1317,20 @@ def _pick_loop(stdscr, state):
         ch = stdscr.getch()
         if ch == -1 or ch == curses.KEY_RESIZE:
             continue
-        elif ch == curses.KEY_UP or ch == 16:
+        act = _key_action(ch, searching)
+        if act == 'up':
             if cursor > 0:
                 cursor -= 1
-        elif ch == curses.KEY_DOWN or ch == 14:
+        elif act == 'down':
             if cursor < n_sel - 1:
                 cursor += 1
-        elif ch in (curses.KEY_ENTER, 10, 13):
+        elif act == 'search':
+            searching = True
+        elif act == 'clear':
+            searching, query, cursor, scroll = False, '', 0, 0
+        elif act == 'help':
+            _show_help(stdscr, max_y, max_x)
+        elif act == 'open':
             if n_sel > 0 and cursor_row >= 0:
                 sid = rows[cursor_row]['sid']
                 if sid and sid != '__header__':
@@ -1261,27 +1338,29 @@ def _pick_loop(stdscr, state):
                         if s['session_id'] == sid:
                             return s
             return None
-        elif ch == 27 or ch == 3:
+        elif act == 'quit':
             return None
-        elif ch == 9:  # Tab = toggle scope
+        elif act == 'scope':
             scope = 'all' if scope == 'cwd' else 'cwd'
             cursor = 0
             scroll = 0
-        elif ch == curses.KEY_BTAB:  # Shift+Tab = cycle view
+        elif act == 'view':
             view_idx = (view_idx + 1) % len(VIEWS)
             cursor = 0
             scroll = 0
-        elif ch in (curses.KEY_BACKSPACE, 127, 8):
+        elif act == 'backspace':
             if query:
                 query = query[:-1]
                 cursor = 0
                 scroll = 0
-        elif ch == 15 and cur_session:  # Ctrl+O = note
+            else:
+                searching = False
+        elif act == 'note' and cur_session:
             task_key = cur_session.get('task_key')
             if task_key:
                 _note_input(stdscr, max_y, max_x, task_key)
                 stdscr.clear()
-        elif ch == 19 and cur_session:  # Ctrl+S = cycle status
+        elif act == 'status' and cur_session:
             task_key = cur_session.get('task_key')
             if task_key:
                 cur_status = _get_task_status(task_key)
@@ -1289,7 +1368,7 @@ def _pick_loop(stdscr, state):
                 new_status = STATUSES[(idx + 1) % len(STATUSES)]
                 _set_task_status(task_key, new_status)
                 stdscr.clear()
-        elif ch == 5 and cur_session:  # Ctrl+E = rename session
+        elif act == 'rename' and cur_session:
             tp = cur_session.get('transcript', '')
             sid = cur_session.get('session_id', '')
             cur_title = cur_session.get('title') or ''
@@ -1300,7 +1379,7 @@ def _pick_loop(stdscr, state):
                 cur_session['task_key'] = extract_task_key(new)
                 state['sig'] = _transcript_signature()
             stdscr.clear()
-        elif ch == 24 and cur_session:  # Ctrl+X = trash session (with confirm)
+        elif act == 'delete' and cur_session:  # trash, with confirm
             tp = cur_session.get('transcript', '')
             title = cur_session.get('title') or cur_session.get('session_id', '')[:8]
             if tp and os.path.exists(tp):
@@ -1311,16 +1390,16 @@ def _pick_loop(stdscr, state):
                     cursor = 0
                     scroll = 0
                 stdscr.clear()
-        elif ch == 18:  # Ctrl+R = force refresh
+        elif act == 'refresh':
             state['sessions'] = scan_transcripts()
             state['sig'] = _transcript_signature()
             stdscr.clear()
-        elif ch == 7 and cur_session:  # Ctrl+G = hop: continue this session in a new one
+        elif act == 'hop' and cur_session:  # continue this session in a new one
             msg = _text_input(stdscr, max_y, max_x, ' Hop. Message for the next session (Enter: none, Esc: cancel): ')
             if msg is not None:
                 return {'hop': cur_session, 'message': msg or None}
             stdscr.clear()
-        elif ch == 20:  # Ctrl+T = new session from a tracker task
+        elif act == 'new':  # new session from a tracker task
             conn, tscope = route(None, os.getcwd())
             if not conn:
                 _flash(stdscr, max_y, max_x, f" No tracker for {os.getcwd()} (see `csm connections`)")
@@ -1329,10 +1408,10 @@ def _pick_loop(stdscr, state):
                 if title:
                     return {'new_title': title}
             stdscr.clear()
-        elif ch == 4:  # Ctrl+D = toggle detail panel
+        elif act == 'panel':
             show_panel = not show_panel
             stdscr.clear()
-        elif 32 <= ch <= 126:
+        elif act == 'type':
             query += chr(ch)
             cursor = 0
             scroll = 0

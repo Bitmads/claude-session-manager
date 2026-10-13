@@ -8,44 +8,22 @@
     "group_template": "{ticket}/{phase}: {title}",
     "bump_field": "session"
   },
-  "hop_prompt": {
-    "enabled": true,
-    "percent": 88,
-    "context_window": 0
-  },
   "connections": {
     "linear": {
       "type": "linear",
       "token_env": "LINEAR_API_KEY",
-      "prefixes": [
-        "SET"
-      ]
+      "prefixes": ["SET"]
     },
     "youtrack": {
       "type": "youtrack",
       "url": "https://example.youtrack.cloud",
       "token_env": "YOUTRACK_TOKEN",
-      "prefixes": [
-        "VIS",
-        "BIT"
-      ]
+      "prefixes": ["VIS", "BIT"]
     }
   },
   "folders": [
-    {
-      "path": "~/dev/settlemate",
-      "connection": "linear",
-      "scope": "SET"
-    },
-    {
-      "path": "~/dev/visited",
-      "connection": "youtrack",
-      "scope": "VIS"
-    },
-    {
-      "path": "~/dev/bitmads",
-      "connection": "youtrack",
-      "scope": "BIT"
-    }
+    { "path": "~/dev/settlemate", "connection": "linear", "scope": "SET" },
+    { "path": "~/dev/visited",    "connection": "youtrack", "scope": "VIS" },
+    { "path": "~/dev/bitmads",    "connection": "youtrack", "scope": "BIT" }
   ]
 }

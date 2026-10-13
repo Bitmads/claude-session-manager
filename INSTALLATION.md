@@ -229,50 +229,6 @@ because zsh and bash don't complete aliases. Completion reads the local cache
 in `~/.claude/csm-cache/`, which `csm tasks`, `csm new` and the picker fill;
 a cache older than 10 minutes refreshes in the background.
 
-## 9. Ask to hop when context fills up (optional)
-
-Once per session, when context usage reaches 88%, Claude asks "Hop to a new
-session now?" at the end of its turn. **Hop now** runs `/hop` (docs update,
-handoff, command). Choosing **Other** and typing text hops with that text as
-the note for the next session. **Not now** carries on and doesn't ask again.
-
-Two pieces are needed, because Claude Code gives the context percentage to
-the status line only, not to hooks, and hooks can't show a prompt themselves:
-
-**a) Status line tap.** In your status line script, save the percentage per
-session (`$input` is the JSON the script read from stdin):
-
-```bash
-CSM_SID=$(printf '%s' "$input" | jq -r '.session_id // empty')
-CSM_PCT=$(printf '%s' "$input" | jq -r '.context_window.used_percentage // empty')
-if [ -n "$CSM_SID" ] && [ -n "$CSM_PCT" ]; then
-  mkdir -p "$HOME/.claude/csm-cache/ctx" && printf '%s' "$CSM_PCT" > "$HOME/.claude/csm-cache/ctx/$CSM_SID"
-fi
-```
-
-**b) Stop hook** in `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "Stop": [{
-      "hooks": [{ "type": "command", "command": "python3 /full/path/to/cc-sessions hook", "timeout": 10 }]
-    }]
-  }
-}
-```
-
-Settings in `~/.claude/csm.json` (these are the defaults):
-
-```json
-{ "hop_prompt": { "enabled": true, "percent": 88, "context_window": 0 } }
-```
-
-No status line? Set `context_window` to your model's window in tokens
-(200000 or 1000000) and csm estimates the percentage from the transcript with
-the same input-tokens formula the status line uses. With `0` and no status
-line reading, the hook stays silent rather than guess.
-
 ## Verify
 
 ```bash

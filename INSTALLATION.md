@@ -237,10 +237,7 @@ handoff, command). Choosing **Other** and typing text hops with that text as
 the note for the next session. **Not now** carries on and doesn't ask again.
 
 Two pieces are needed, because Claude Code gives the context percentage to
-the status line only, not to hooks, and hooks can't show a prompt themselves.
-(There is no other source: no env var, CLI flag or file has it. See
-anthropics/claude-code issues #34340, closed as not planned, and #18664.)
-The status line value is Claude Code's own number, not an estimate:
+the status line only, not to hooks, and hooks can't show a prompt themselves:
 
 **a) Status line tap.** In your status line script, save the percentage per
 session (`$input` is the JSON the script read from stdin):

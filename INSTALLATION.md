@@ -229,6 +229,39 @@ because zsh and bash don't complete aliases. Completion reads the local cache
 in `~/.claude/csm-cache/`, which `csm tasks`, `csm new` and the picker fill;
 a cache older than 10 minutes refreshes in the background.
 
+## 9. Ask to hop when context fills up (optional)
+
+Once per session, when context usage reaches 88%, a dialog asks "Context is at
+88%. Hop to a new session now?" at the end of the turn:
+
+- **Hop now** runs `/hop` (docs update, handoff, command).
+- **Type something** hops with that text as the note for the next session.
+- **Not now** (or Esc) carries on and doesn't ask again in that session.
+
+It's a small Claude Code plugin in `mods/hop-prompt/`. It reads the engine's
+own context figure (`$.session.usage()`, the number the status line and
+`/context` show), so nothing is estimated and there is no window size to
+configure. It doesn't touch your status line or your hooks.
+
+Load it for every session by adding its folder to the `env` block of
+`~/.claude/settings.json`:
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/full/path/to/claude-session-manager/mods/hop-prompt" } }
+```
+
+Or for one session: `claude --plugin-dir /full/path/to/mods/hop-prompt`.
+Needs the `/hop` skill (step 4). To change the threshold, set the plugin's
+"Ask at this context %" option in `/config`.
+
+The plugin API is early access in Claude Code and can change between
+releases. Check the plugin against your version with:
+
+```bash
+claude plugin validate mods/hop-prompt
+claude plugin test mods/hop-prompt
+```
+
 ## Verify
 
 ```bash

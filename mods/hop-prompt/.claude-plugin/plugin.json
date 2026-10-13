@@ -1,0 +1,17 @@
+{
+  "name": "hop-prompt",
+  "version": "0.1.0",
+  "description": "Asks once per session, when context reaches a threshold, whether to /hop to a new session",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "percent": {
+      "type": "number",
+      "title": "Ask at this context %",
+      "description": "Context usage, in percent, at which to ask whether to hop",
+      "default": 88
+    }
+  },
+  "author": {
+    "name": "Bitmads"
+  }
+}
